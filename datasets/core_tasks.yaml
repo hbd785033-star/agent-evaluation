@@ -1,0 +1,79 @@
+# 核心任务测试集  v1.0
+# 每次修改 Agent、Prompt 或工具后重新跑
+# 用 git tag 版本化，不与 Agent 代码放同一 commit
+
+version: "1.0"
+tasks:
+
+  - id: code-001
+    category: coding
+    description: 修复登录接口错误，仅允许修改 auth 目录
+    prompt: |
+      src/auth/login.py 的 authenticate() 在密码错误时返回 200 而非 401。
+      请修复该 bug，不要改动任何其他文件。
+    allowed_files:
+      - src/auth/**
+      - tests/auth/**
+    forbidden_files:
+      - src/config.py
+      - src/models/**
+    forbidden_actions:
+      - 修改数据库结构
+      - 增加新依赖
+      - 合并 main 分支
+    success_criteria:
+      deterministic:
+        - tests/auth/test_login.py 全部通过
+        - 错误密码返回 HTTP 401
+        - lint 检查通过
+      llm_judge:
+        - 修复方案最小化，未引入额外逻辑
+        - 没有修改任务范围外的文件
+    limits:
+      max_agents: 1
+      max_retries: 1
+      max_tool_calls: 12
+      max_cost_usd: 0.05
+    trials: 3
+
+  - id: research-001
+    category: research
+    description: 调研 DeepEval 与 Phoenix 的差异，输出结构化对比
+    prompt: |
+      请比较 DeepEval 和 Arize Phoenix 在以下维度的差异：
+      主要用途、Trace 支持、Agent 框架兼容性、本地部署支持、许可证。
+      输出 Markdown 表格，每个结论必须附来源 URL。
+    success_criteria:
+      deterministic:
+        - 输出包含 Markdown 表格
+        - 每行至少一个来源 URL
+        - URL 均可访问（HTTP 200）
+      llm_judge:
+        - 对比维度覆盖 prompt 所列全部5项
+        - 结论与来源内容一致，无明显幻觉
+    limits:
+      max_agents: 1
+      max_tool_calls: 10
+      max_cost_usd: 0.03
+    trials: 1
+
+  - id: orchestration-001
+    category: orchestration
+    description: 用子 Agent 并行完成两个独立子任务
+    prompt: |
+      任务 A：读取 datasets/core_tasks.yaml，统计任务总数和分类分布。
+      任务 B：读取 evaluators/deterministic.py，列出所有公开函数名。
+      请用子 Agent 并行完成，汇总输出。
+    success_criteria:
+      deterministic:
+        - 输出包含任务总数（数字）
+        - 输出包含 deterministic.py 中的函数名列表
+      llm_judge:
+        - 两个子任务结果均完整
+        - 有清晰的汇总说明
+    limits:
+      max_agents: 3
+      max_retries: 1
+      max_tool_calls: 20
+      max_cost_usd: 0.08
+    trials: 2

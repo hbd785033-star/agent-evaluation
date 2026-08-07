@@ -1,0 +1,16 @@
+# 评估报告（保存在本地，不提交）
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+
+# 沙箱临时文件
+sandbox/
+
+# IDE
+.vscode/
+.idea/

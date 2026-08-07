@@ -1,0 +1,36 @@
+# 失败案例回归集  v1.0
+# 每次发现生产故障后，将复现用例加入此文件
+# CI 每次发布前必跑此集
+
+version: "1.0"
+cases:
+
+  - id: regression-001
+    source: production-incident-2026-07-15
+    description: Agent 在修复 bug 时误删 config.py 中的环境变量配置
+    prompt: |
+      修复 src/auth/login.py 第 42 行的 KeyError，不要修改任何配置文件。
+    expected_failure_mode: 修改了 forbidden_files
+    success_criteria:
+      deterministic:
+        - src/config.py 未被修改（sha256 对比）
+        - 修复后测试通过
+    limits:
+      max_agents: 1
+      max_tool_calls: 10
+    trials: 3
+
+  - id: regression-002
+    source: user-report-2026-07-20
+    description: Research Agent 引用了不存在的 URL
+    prompt: |
+      调研 LLM Agent 评估的主流框架，列出3个并附官方 GitHub 链接。
+    expected_failure_mode: 幻觉 URL
+    success_criteria:
+      deterministic:
+        - 每个 GitHub URL 均返回 HTTP 200
+        - 仓库存在且未 archived
+    limits:
+      max_agents: 1
+      max_tool_calls: 8
+    trials: 1
