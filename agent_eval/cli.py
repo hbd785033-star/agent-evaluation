@@ -31,6 +31,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", required=True)
     run.add_argument("--provider", required=True)
     run.add_argument("--harness", default="command")
+    run.add_argument("--source-cwd", help="source tree copied into each isolated trial")
+    run.add_argument("--workspace-root", default=".agent-eval-workspaces")
+    run.add_argument("--preserve-workspaces", action="store_true")
+    run.add_argument(
+        "--trusted-record-workspace-root",
+        help="control-plane trust root for replayed record paths",
+    )
+    run.add_argument(
+        "--record-isolation-level",
+        choices=("none", "workspace", "os"),
+        default="none",
+        help="control-plane-verified isolation used to produce replayed records",
+    )
     source = run.add_mutually_exclusive_group(required=True)
     source.add_argument("--records", help="re-score exported RunRecord JSON")
     source.add_argument(
@@ -45,7 +58,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     version, tasks = load_dataset(args.dataset)
     if args.records:
-        adapter = RecordedAdapter(_load_records(args.records))
+        adapter = RecordedAdapter(
+            _load_records(args.records),
+            model=args.model,
+            provider=args.provider,
+            harness=args.harness,
+            workspace_root=args.trusted_record_workspace_root,
+            isolation_level=args.record_isolation_level,
+        )
     else:
         if not args.command:
             raise SystemExit("--command requires at least one argument")
@@ -54,16 +74,24 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             provider=args.provider,
             harness=args.harness,
+            cwd=args.source_cwd,
+            workspace_root=args.workspace_root,
+            preserve_workspaces=args.preserve_workspaces,
         )
-    report = EvalRunner(adapter).run(tasks, trials_override=args.trials)
-    report["dataset_version"] = version
+    report = EvalRunner(adapter, dataset_version=version).run(
+        tasks, trials_override=args.trials
+    )
     json_path, md_path = write_report(report, args.output_dir)
+    passed_runs = sum(1 for run in report["runs"] if run["passed"] is True)
+    all_passed = report["run_count"] > 0 and passed_runs == report["run_count"]
     print(json.dumps({
         "runs": report["run_count"],
+        "passed_runs": passed_runs,
+        "all_passed": all_passed,
         "report_json": str(json_path),
         "report_md": str(md_path),
     }))
-    return 0
+    return 0 if all_passed else 1
 
 
 if __name__ == "__main__":

@@ -105,7 +105,14 @@ class TestRunRecordAndRunner:
 
         assert report["run_count"] == 2
         assert report["aggregates"][0]["trials"] == 2
-        assert report["aggregates"][0]["pass_rate"] == 1.0
+        assert report["aggregates"][0]["pass_rate"] == 0.0
+        assert all(
+            any(
+                failure["check"] == "os_sandbox_enforced"
+                for failure in row["layers"]["deterministic"]["failures"]
+            )
+            for row in report["runs"]
+        )
         assert [row["record"]["run_id"] for row in report["runs"]] == ["run-1", "run-2"]
         assert json.loads(json_path.read_text(encoding="utf-8"))["run_count"] == 2
         assert "kimi-k3" in md_path.read_text(encoding="utf-8")
@@ -155,7 +162,9 @@ class TestRunRecordAndRunner:
             prompt="x",
             success_criteria={"deterministic": ["tests pass"]},
         )
-        record = RunRecord("t", "m", "p", "h", 1, output="ok")
+        record = RunRecord(
+            "t", "m", "p", "h", 1, output="ok", run_id="run-check"
+        )
         adapter = RecordedAdapter([record])
         report = EvalRunner(
             adapter,

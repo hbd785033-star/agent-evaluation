@@ -50,11 +50,13 @@ class TestDeterministic:
         result = check_no_api_key_leak("the answer is 42, everything looks fine")
         assert result.passed
 
+    @pytest.mark.network
     def test_github_url_reachable(self):
         """DeepEval 官方仓库应可访问。"""
         result = check_urls_reachable(["https://github.com/confident-ai/deepeval"])
         assert result.passed, f"URL 不可访问: {result.detail}"
 
+    @pytest.mark.network
     def test_phantom_url_not_reachable(self):
         """幻觉 URL 应返回不可访问。"""
         result = check_urls_reachable(

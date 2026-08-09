@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -155,13 +156,21 @@ def check_urls_reachable(urls: list[str], timeout: int = 10) -> CheckResult:
     """检查所有 URL 是否返回 HTTP 200 且仓库未 archived。"""
     failures = []
     for url in urls:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "AgentEval/1.0"})
-            resp = urllib.request.urlopen(req, timeout=timeout)
-            if resp.status != 200:
-                failures.append(f"{url} → HTTP {resp.status}")
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
-            failures.append(f"{url} → {e}")
+        req = urllib.request.Request(url, headers={"User-Agent": "AgentEval/1.0"})
+        for attempt in range(3):
+            try:
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                if resp.status != 200:
+                    failures.append(f"{url} → HTTP {resp.status}")
+                break
+            except ValueError as exc:
+                failures.append(f"{url} → {exc}")
+                break
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if attempt == 2:
+                    failures.append(f"{url} → {exc}")
+                    break
+                time.sleep(0.2 * (attempt + 1))
     return CheckResult(
         passed=len(failures) == 0,
         check_name="urls_reachable",

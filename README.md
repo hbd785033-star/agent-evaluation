@@ -1,4 +1,4 @@
-# agent-evaluation
+﻿# agent-evaluation
 
 面向真实 Model / Agent / Harness 运行的五层评估框架：
 
@@ -22,7 +22,7 @@ report.json + report.md
 
 > **`pytest` 通过只代表评估框架、数据结构和 runner 合约通过，不代表 Kimi、Hermes 或任何模型通过了任务集。**
 
-只有 `report.json` 中实际存在的 `RunRecord` 才是模型/Provider/Harness trial。报告会同时记录 `model + provider + harness + trial`，避免把 harness 差异误算成模型能力差异。
+只有 `report.json` 中实际存在且通过完整性校验的 `RunRecord` 才是模型/Provider/Harness trial。`task_id + model + provider + harness + trial` 由 Runner 固定，Harness 不能覆盖；重复 `run_id`、负 telemetry、`cached_tokens > input_tokens` 或错误字段类型会将 trial 标记失败。
 
 ## 核心对象：RunRecord
 
@@ -47,7 +47,7 @@ python -m pip install -e ".[deepeval]"
 
 ## 运行真实 Harness
 
-`CommandAgentAdapter` 不使用 shell；它把任务 JSON 写入子进程 stdin，并要求 Harness 在 stdout 返回一个 JSON 对象。
+`CommandAgentAdapter` 不使用 shell；它把任务 JSON 写入子进程 stdin，并要求 Harness 在 stdout 返回一个 JSON 对象。每个 task/trial 默认获得独立的临时 **workspace**；`--source-cwd` 指定的源树会被复制到各自 workspace，canonical path 检查绑定同一个可信根。workspace 复制不等于操作系统 sandbox，不能阻止恶意进程访问宿主机其他绝对路径。因此含 `allowed_files`、`forbidden_files` 或 `forbidden_actions` 的任务只有在控制面确认 `isolation_level=os` 时才能通过；普通 Command adapter 会报告 `isolation_level=workspace` 并对这类任务 fail-closed。
 
 ```bash
 python -m agent_eval run \
@@ -55,6 +55,8 @@ python -m agent_eval run \
   --model kimi-k3 \
   --provider moonshot \
   --harness kimi-code \
+  --source-cwd path/to/source-tree \
+  --workspace-root reports/workspaces \
   --output-dir reports/kimi-k3 \
   --command python path/to/kimi_harness.py
 ```
@@ -92,7 +94,7 @@ Harness 最小输出：
 }
 ```
 
-子进程失败、超时或输出无效 JSON 时，runner 会写入失败 `RunRecord`；不会生成看似合理的虚假结果。
+子进程失败、超时、输出 `null`/无效 JSON 或返回 malformed telemetry 时，runner 会写入失败 `RunRecord`；不会生成看似合理的虚假结果。默认在评分后删除 workspace；需要审计工作区时使用 `--preserve-workspaces`。只要存在失败 trial 或聚合 pass rate 小于 100%，CLI 返回非零状态。
 
 ## 重放已有记录
 
@@ -102,9 +104,13 @@ python -m agent_eval run \
   --model kimi-k3 \
   --provider moonshot \
   --harness kimi-code \
+  --trusted-record-workspace-root reports/imported-workspaces \
+  --record-isolation-level os \
   --records exported-runs.json \
   --output-dir reports/rescored
 ```
+
+重放时，记录内自报的 `workspace_root`、`dataset_version`、`sandbox_id` 和 `isolation_level` 不被信任。`--trusted-record-workspace-root` 与 `--record-isolation-level` 必须来自生成记录的控制面；缺失时路径证据和隔离声明会 fail-closed。
 
 ## 报告
 
@@ -131,9 +137,9 @@ reports/<experiment>/report.md
 2. **Trajectory**：禁止工具、重复读取、失败重试和工具分布。
 3. **Cost**：token、cache、tool calls、sub-agent、成本与延迟。
 4. **Security**：canonical 路径边界、危险命令、凭据、Prompt Injection。
-5. **LLM Judge**：仅评价无法代码化的质量维度；未配置校准 Judge 时明确标记 `skipped`。
+5. **LLM Judge**：仅评价无法代码化的质量维度；Judge 必须显式声明 `calibrated=True` 并返回严格 schema，否则 fail-closed。
 
-> Fail-closed：数据集声明了自然语言 deterministic criteria 却没有注册可执行 `task_check`，或声明了 `llm_judge` criteria 却没有校准 Judge 时，该 trial 不会被推断为 PASS。
+> Fail-closed：数据集声明的 unknown criteria、未执行的 deterministic criteria、`forbidden_files`/`forbidden_actions`，或未配置校准 Judge 的 `llm_judge` criteria，均不会被推断为 PASS。任务检查器必须逐条覆盖声明的 criteria。
 
 LLM Judge 上线前应使用人工黄金集校准，Pearson 相关系数建议至少 `0.7`。
 
@@ -145,14 +151,13 @@ python -m pytest tests/ -v
 
 # CI 同款：无公网依赖
 python -m pytest tests/ -v \
-  -m "not regression" \
-  -k "not github_url_reachable and not phantom_url_not_reachable"
+  -m "not regression and not network"
 
 # 真正选择得到 regression 测试，不再发生 0 tests 假绿
-python -m pytest tests/test_runner.py -v -m regression
+python -m pytest tests/test_runner.py tests/test_review_regressions.py -v -m regression
 ```
 
-当前测试覆盖 evaluator 单元逻辑、canonical 路径/注入边界、数据集 schema、真实 subprocess N-trial runner、失败 harness 记录、JSON/Markdown 报告生成。
+当前测试覆盖 evaluator 单元逻辑、sandbox/canonical 路径/注入边界、数据集 schema、真实 subprocess N-trial runner、trial 污染隔离、身份与 telemetry 完整性、失败 harness 记录、JSON/Markdown 报告生成，以及 `failure_cases.yaml` 的真实评分。
 
 ## CI 语义
 
