@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import statistics
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -242,7 +242,7 @@ def build_report(runs: list[EvaluatedRun]) -> dict[str, Any]:
 
     return {
         "schema_version": "1.0",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "run_count": len(runs),
         "runs": [run.to_dict() for run in runs],
         "aggregates": aggregates,

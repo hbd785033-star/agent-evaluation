@@ -36,13 +36,13 @@ report.json + report.md
 ## 安装
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 ```
 
 如需 DeepEval：
 
 ```bash
-python -m pip install -r requirements-optional.txt
+python -m pip install -e ".[deepeval]"
 ```
 
 ## 运行真实 Harness

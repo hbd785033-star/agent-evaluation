@@ -16,12 +16,14 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install minimal dependencies
-        run: python -m pip install -r requirements.txt
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check agent_eval evaluators tests/test_runner.py
       - name: Run framework tests without public-network probes
         run: |
           mkdir -p reports
-          pytest tests/ -v \
+          python -m pytest tests/ -v \
             -m "not regression" \
             -k "not github_url_reachable and not phantom_url_not_reachable" \
             --tb=short \
@@ -42,12 +44,12 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install minimal dependencies
-        run: python -m pip install -r requirements.txt
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[dev]"
       - name: Run actual marked regression tests
         run: |
           mkdir -p reports
-          pytest tests/test_runner.py -v -m regression \
+          python -m pytest tests/test_runner.py -v -m regression \
             --tb=long \
             --junitxml=reports/regression.xml
       - name: Upload regression results

@@ -176,7 +176,11 @@ def check_numbers_in_source(
     tolerance: float = 0.05
 ) -> CheckResult:
     """检查研究报告中引用的数字能否在来源文本中找到。"""
-    pattern = str(int(claimed_number)) if claimed_number == int(claimed_number)         else str(claimed_number)
+    pattern = (
+        str(int(claimed_number))
+        if claimed_number == int(claimed_number)
+        else str(claimed_number)
+    )
     found = pattern in source_text
     return CheckResult(
         passed=found,
