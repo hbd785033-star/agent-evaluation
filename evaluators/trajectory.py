@@ -3,9 +3,9 @@
 支持：工具调用检查、参数检查、重复操作检测、步骤顺序验证。
 """
 from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
-from typing import Any
 
 
 @dataclass
@@ -64,7 +64,8 @@ def check_trajectory(
             read_counts[fp] = read_counts.get(fp, 0) + 1
             if read_counts[fp] > max_repeated_reads:
                 violations.append(
-                    f"step {step.step_id}: 文件 '{fp}' 被读取 {read_counts[fp]} 次（超过上限 {max_repeated_reads}）"
+                    f"step {step.step_id}: 文件 '{fp}' 被读取 {read_counts[fp]} 次"
+                    f"（超过上限 {max_repeated_reads}）"
                 )
 
         # 检测连续失败重试
@@ -110,7 +111,11 @@ def parse_hermes_trace(trace_json: dict) -> list[TrajectoryStep]:
     steps = []
     for i, span in enumerate(trace_json.get("spans", [])):
         attrs = span.get("attributes", {})
-        tool_name = attrs.get("gen_ai.tool.name") or attrs.get("tool_name") or span.get("name", "unknown")
+        tool_name = (
+            attrs.get("gen_ai.tool.name")
+            or attrs.get("tool_name")
+            or span.get("name", "unknown")
+        )
         args_raw = attrs.get("gen_ai.tool.call.arguments") or attrs.get("arguments") or "{}"
         try:
             args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw

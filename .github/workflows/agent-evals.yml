@@ -1,4 +1,4 @@
-name: Agent Evals CI
+name: Agent Evaluation Framework CI
 
 on:
   push:
@@ -7,92 +7,50 @@ on:
     branches: [main]
 
 jobs:
-  # 窄 Evals：每次 commit 都跑，快且便宜
-  narrow-evals:
-    name: Narrow Evals (deterministic + trajectory + security)
+  framework-and-runner-smoke:
+    name: Framework unit tests + real subprocess runner smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run narrow evals (no LLM calls)
+          cache: pip
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check agent_eval evaluators tests/test_runner.py tests/test_review_regressions.py
+      - name: Run framework tests without public-network probes
         run: |
-          pytest tests/ -v \
-            -k "Deterministic or Trajectory or Cost or Security or Dataset" \
+          mkdir -p reports
+          python -m pytest tests/ -v \
+            -m "not regression and not network" \
             --tb=short \
-            --junitxml=reports/narrow-evals.xml
-
-      - name: Upload test results
+            --junitxml=reports/framework.xml
+      - name: Upload framework results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: narrow-evals-results
-          path: reports/narrow-evals.xml
+          name: framework-results
+          path: reports/framework.xml
 
-  # 宽 Evals：仅在 PR 到 main 时跑（需要 LLM API Key）
-  wide-evals:
-    name: Wide Evals (full end-to-end)
+  regression-dataset:
+    name: Regression dataset + runner contract
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    env:
-      OPENAI_API_KEY: \${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run full eval suite
+          cache: pip
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run actual marked regression tests
         run: |
-          pytest tests/ -v \
-            --tb=short \
-            --junitxml=reports/wide-evals.xml \
-            -x   # 遇到第一个失败立即停止
-
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: wide-evals-results
-          path: reports/wide-evals.xml
-
-  # 回归测试：专跑 failure_cases，每次发布前触发
-  regression:
-    name: Regression (failure cases)
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    env:
-      OPENAI_API_KEY: \${{ secrets.OPENAI_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run regression tests
-        run: |
-          pytest tests/ -v -k "regression" \
+          mkdir -p reports
+          python -m pytest tests/test_runner.py tests/test_review_regressions.py -v -m regression \
             --tb=long \
             --junitxml=reports/regression.xml
-
       - name: Upload regression results
         if: always()
         uses: actions/upload-artifact@v4

@@ -10,10 +10,12 @@ LLM Judge：对无法用代码判断的质量维度进行评分。
     --rubric rubrics/coding.md
 """
 from __future__ import annotations
-import argparse, json, os, sys
+
+import argparse
+import json
+import os
 from pathlib import Path
 from typing import Any
-
 
 JUDGE_SYSTEM_PROMPT = """你是一个严格的 Agent 任务评估员。
 你的工作是评估 Agent 完成任务的质量。
@@ -77,7 +79,8 @@ def call_llm_judge(
 
 
 def _call_openai(prompt: str, model: str) -> dict[str, Any]:
-    import urllib.request, json as _json
+    import json as _json
+    import urllib.request
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return {"error": "OPENAI_API_KEY not set", "passed": False, "score": 0}
@@ -107,7 +110,8 @@ def _call_openai(prompt: str, model: str) -> dict[str, Any]:
 
 
 def _call_anthropic(prompt: str, model: str = "claude-haiku-4-5") -> dict[str, Any]:
-    import urllib.request, json as _json
+    import json as _json
+    import urllib.request
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return {"error": "ANTHROPIC_API_KEY not set", "passed": False, "score": 0}
@@ -133,7 +137,12 @@ def _call_anthropic(prompt: str, model: str = "claude-haiku-4-5") -> dict[str, A
     data = _json.load(resp)
     content = data["content"][0]["text"]
     # strip markdown code blocks if present
-    content = content.strip().strip("```json").strip("```").strip()
+    lines = content.strip().splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    content = "\n".join(lines).strip()
     result = _json.loads(content)
     result["model_used"] = model
     result["tokens"] = data.get("usage", {})
@@ -161,21 +170,25 @@ def calibrate_judge(
     if n < 2:
         return {"pearson": None, "warning": "样本太少，无法校准"}
 
-    mean_h = sum(human_scores) / n
-    mean_l = sum(llm_scores) / n
-    cov = sum((h - mean_h) * (l - mean_l) for h, l in zip(human_scores, llm_scores)) / n
-    std_h = math.sqrt(sum((h - mean_h)**2 for h in human_scores) / n)
-    std_l = math.sqrt(sum((l - mean_l)**2 for l in llm_scores) / n)
-
-    if std_h == 0 or std_l == 0:
-        pearson = 0.0
-    else:
-        pearson = cov / (std_h * std_l)
+    mean_human = sum(human_scores) / n
+    mean_llm = sum(llm_scores) / n
+    cov = sum(
+        (human - mean_human) * (llm - mean_llm)
+        for human, llm in zip(human_scores, llm_scores, strict=True)
+    ) / n
+    std_human = math.sqrt(sum((score - mean_human) ** 2 for score in human_scores) / n)
+    std_llm = math.sqrt(sum((score - mean_llm) ** 2 for score in llm_scores) / n)
+    pearson = 0.0 if std_human == 0 or std_llm == 0 else cov / (std_human * std_llm)
+    warning = (
+        ""
+        if pearson >= threshold
+        else f"相关性 {pearson:.2f} 低于阈值 {threshold}，评分器不可靠"
+    )
 
     return {
         "pearson": round(pearson, 3),
         "calibrated": pearson >= threshold,
-        "warning": "" if pearson >= threshold else f"相关性 {pearson:.2f} 低于阈值 {threshold}，评分器不可靠"
+        "warning": warning,
     }
 
 
@@ -187,7 +200,12 @@ if __name__ == "__main__":
     parser.add_argument("--provider", default="openai")
     args = parser.parse_args()
 
-    rubric = Path(args.rubric_file).read_text(encoding="utf-8")         if Path(args.rubric_file).exists() else "（无评分标准文件）"
+    rubric_path = Path(args.rubric_file)
+    rubric = (
+        rubric_path.read_text(encoding="utf-8")
+        if rubric_path.exists()
+        else "（无评分标准文件）"
+    )
 
     result = call_llm_judge(
         task_desc=args.task_desc,
