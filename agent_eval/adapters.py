@@ -1,4 +1,5 @@
 """Adapters that turn real harness executions into RunRecord objects."""
+
 from __future__ import annotations
 
 import copy
@@ -125,7 +126,7 @@ class CommandAgentAdapter:
                 "allowed_files": task.allowed_files,
                 "forbidden_files": task.forbidden_files,
                 "forbidden_actions": task.forbidden_actions,
-                "success_criteria": task.success_criteria,
+                "success_criteria": task.success_criteria_mapping(),
                 "limits": task.limits,
             },
             "trial": trial,
@@ -237,9 +238,7 @@ class RecordedAdapter:
         self.model = model or (first.model if first else "recorded")
         self.provider = provider or (first.provider if first else "recorded")
         self.harness = harness or (first.harness if first else "recorded")
-        self.workspace_root = (
-            Path(workspace_root).resolve() if workspace_root is not None else None
-        )
+        self.workspace_root = Path(workspace_root).resolve() if workspace_root is not None else None
         if isolation_level not in {"none", "workspace", "os"}:
             raise ValueError("isolation_level must be none, workspace, or os")
         self.isolation_level = isolation_level

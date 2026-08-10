@@ -47,6 +47,31 @@ python -m pip install -e ".[deepeval]"
 
 ## 运行真实 Harness
 
+### 可重复 PASS 演示
+
+以下命令使用仓库内的 controlled Perfect Agent、checker profile 和固定 Judge
+fixture，不调用外部模型：
+
+```bash
+python -m agent_eval run \
+  --dataset datasets/smoke_tasks.yaml \
+  --model controlled-perfect \
+  --provider fixture \
+  --harness perfect-agent \
+  --checker-profile profiles/checkers/smoke-v1.yaml \
+  --judge-profile profiles/judges/controlled-v1.json \
+  --source-cwd . \
+  --workspace-root ../agent-eval-smoke-workspaces \
+  --output-dir reports/smoke \
+  --command python examples/perfect_agent.py
+```
+
+成功时 CLI 返回 `0`，并在 `report.json` 中记录每条 criterion evidence 与
+Judge 的 `calibration_id`、prompt 和 rubric 版本。`controlled-v1` 仅用于测试
+闭环，不代表生产 LLM Judge 已完成校准。
+
+同一组参数也可写入 `eval.yaml`，再运行 `python -m agent_eval run --config eval.yaml ...`。
+
 `CommandAgentAdapter` 不使用 shell；它把任务 JSON 写入子进程 stdin，并要求 Harness 在 stdout 返回一个 JSON 对象。每个 task/trial 默认获得独立的临时 **workspace**；`--source-cwd` 指定的源树会被复制到各自 workspace，canonical path 检查绑定同一个可信根。workspace 复制不等于操作系统 sandbox，不能阻止恶意进程访问宿主机其他绝对路径。因此含 `allowed_files`、`forbidden_files` 或 `forbidden_actions` 的任务只有在控制面确认 `isolation_level=os` 时才能通过；普通 Command adapter 会报告 `isolation_level=workspace` 并对这类任务 fail-closed。
 
 ```bash
@@ -110,7 +135,20 @@ python -m agent_eval run \
   --output-dir reports/rescored
 ```
 
-重放时，记录内自报的 `workspace_root`、`dataset_version`、`sandbox_id` 和 `isolation_level` 不被信任。`--trusted-record-workspace-root` 与 `--record-isolation-level` 必须来自生成记录的控制面；缺失时路径证据和隔离声明会 fail-closed。
+重放时，记录内自报的 `workspace_root`、`dataset_version`、`sandbox_id` 和 `isolation_level` 不被信任。
+
+## 评估 AAO ExecutionRecord 0.1
+
+```bash
+python -m agent_eval evaluate execution-record.json \
+  --dataset datasets/smoke_tasks.yaml \
+  --checker-profile profiles/checkers/smoke-v1.yaml \
+  --judge-profile profiles/judges/controlled-v1.json \
+  --output-dir reports/aao
+```
+
+输入必须精确匹配 `ExecutionRecord 0.1`。未知字段、缺失字段、重复 run ID 或
+不支持的版本会被明确拒绝，不会静默忽略。`--trusted-record-workspace-root` 与 `--record-isolation-level` 必须来自生成记录的控制面；缺失时路径证据和隔离声明会 fail-closed。
 
 ## 报告
 

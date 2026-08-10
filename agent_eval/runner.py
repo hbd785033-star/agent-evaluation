@@ -1,4 +1,5 @@
 """Execute N real trials, score five layers, and emit aggregate reports."""
+
 from __future__ import annotations
 
 import copy
@@ -26,6 +27,7 @@ from evaluators.security import run_security_suite
 from evaluators.trajectory import TrajectoryStep, check_trajectory
 
 from .adapters import AgentAdapter
+from .checkers import CheckerProfile, TaskCheckRegistry
 from .models import EvaluatedRun, RunRecord, TaskCase
 
 Judge = Callable[[TaskCase, RunRecord, dict[str, Any]], dict[str, Any]]
@@ -79,13 +81,15 @@ def _trajectory_steps(record: RunRecord) -> list[TrajectoryStep]:
             step_id = int(raw.get("step_id", index))
         except (TypeError, ValueError, OverflowError):
             step_id = index
-        steps.append(TrajectoryStep(
-            step_id=step_id,
-            tool_name=str(raw.get("tool_name", raw.get("tool", raw.get("name", "unknown")))),
-            arguments=arguments if isinstance(arguments, dict) else {},
-            result_summary=str(raw.get("result_summary", "")),
-            success=bool(raw.get("success", True)),
-        ))
+        steps.append(
+            TrajectoryStep(
+                step_id=step_id,
+                tool_name=str(raw.get("tool_name", raw.get("tool", raw.get("name", "unknown")))),
+                arguments=arguments if isinstance(arguments, dict) else {},
+                result_summary=str(raw.get("result_summary", "")),
+                success=bool(raw.get("success", True)),
+            )
+        )
     return steps
 
 
@@ -113,6 +117,7 @@ def evaluate_run(
     task_check: TaskCheck | None = None,
     *,
     authority_verified: bool = False,
+    checker_profile: CheckerProfile | None = None,
 ) -> EvaluatedRun:
     integrity_errors = record.integrity_errors()
     deterministic_checks: list[CheckResult] = [
@@ -133,12 +138,14 @@ def evaluate_run(
     workspace = Path(workspace_raw).resolve() if workspace_raw else None
     commands, paths = _commands_and_paths(record)
     if paths and workspace is None:
-        deterministic_checks.append(CheckResult(
-            False,
-            "trusted_workspace_present",
-            "paths were reported without a trusted workspace_root",
-            paths,
-        ))
+        deterministic_checks.append(
+            CheckResult(
+                False,
+                "trusted_workspace_present",
+                "paths were reported without a trusted workspace_root",
+                paths,
+            )
+        )
     if task.allowed_files:
         deterministic_checks.append(
             check_no_forbidden_files_modified(
@@ -149,38 +156,40 @@ def evaluate_run(
         )
     normalized_paths = [(_normalized_path(path, workspace), path) for path in paths]
     forbidden_path_hits = [
-        original for normalized, original in normalized_paths
+        original
+        for normalized, original in normalized_paths
         if any(
             fnmatch.fnmatch(normalized, _normalized_path(pattern))
             for pattern in task.forbidden_files
         )
     ]
-    deterministic_checks.append(CheckResult(
-        passed=not forbidden_path_hits,
-        check_name="forbidden_files",
-        detail="ok" if not forbidden_path_hits else f"forbidden paths: {forbidden_path_hits}",
-        evidence=forbidden_path_hits,
-    ))
-    action_text = _normalized_action("\n".join(
-        [*commands, *(step.tool_name for step in _trajectory_steps(record))]
-    ))
-    forbidden_action_hits = [
-        action
-        for action in task.forbidden_actions
-        if _normalized_action(action) in action_text
-    ]
-    deterministic_checks.append(CheckResult(
-        passed=not forbidden_action_hits,
-        check_name="forbidden_actions",
-        detail=(
-            "ok" if not forbidden_action_hits
-            else f"forbidden actions observed: {forbidden_action_hits}"
-        ),
-        evidence=forbidden_action_hits,
-    ))
-    constrained = bool(
-        task.allowed_files or task.forbidden_files or task.forbidden_actions
+    deterministic_checks.append(
+        CheckResult(
+            passed=not forbidden_path_hits,
+            check_name="forbidden_files",
+            detail="ok" if not forbidden_path_hits else f"forbidden paths: {forbidden_path_hits}",
+            evidence=forbidden_path_hits,
+        )
     )
+    action_text = _normalized_action(
+        "\n".join([*commands, *(step.tool_name for step in _trajectory_steps(record))])
+    )
+    forbidden_action_hits = [
+        action for action in task.forbidden_actions if _normalized_action(action) in action_text
+    ]
+    deterministic_checks.append(
+        CheckResult(
+            passed=not forbidden_action_hits,
+            check_name="forbidden_actions",
+            detail=(
+                "ok"
+                if not forbidden_action_hits
+                else f"forbidden actions observed: {forbidden_action_hits}"
+            ),
+            evidence=forbidden_action_hits,
+        )
+    )
+    constrained = bool(task.allowed_files or task.forbidden_files or task.forbidden_actions)
     authority_sensitive = bool(
         constrained
         or record.workspace_root
@@ -188,71 +197,94 @@ def evaluate_run(
         or record.sandbox_id
         or record.dataset_version
     )
-    deterministic_checks.append(CheckResult(
-        passed=authority_verified or not authority_sensitive,
-        check_name="control_plane_authority_verified",
-        detail=(
-            "ok"
-            if authority_verified or not authority_sensitive
-            else "authority-sensitive record requires EvalRunner canonicalization"
-        ),
-    ))
-    deterministic_checks.append(CheckResult(
-        passed=not constrained or record.isolation_level == "os",
-        check_name="os_sandbox_enforced",
-        detail=(
-            "ok"
-            if not constrained or record.isolation_level == "os"
-            else (
-                f"policy-constrained task requires os isolation; got "
-                f"{record.isolation_level!r}"
-            )
-        ),
-    ))
+    deterministic_checks.append(
+        CheckResult(
+            passed=authority_verified or not authority_sensitive,
+            check_name="control_plane_authority_verified",
+            detail=(
+                "ok"
+                if authority_verified or not authority_sensitive
+                else "authority-sensitive record requires EvalRunner canonicalization"
+            ),
+        )
+    )
+    deterministic_checks.append(
+        CheckResult(
+            passed=not constrained or record.isolation_level == "os",
+            check_name="os_sandbox_enforced",
+            detail=(
+                "ok"
+                if not constrained or record.isolation_level == "os"
+                else (
+                    f"policy-constrained task requires os isolation; got {record.isolation_level!r}"
+                )
+            ),
+        )
+    )
     supported_criteria = {"deterministic", "llm_judge"}
     unknown_criteria = sorted(set(task.success_criteria) - supported_criteria)
-    deterministic_checks.append(CheckResult(
-        passed=not unknown_criteria,
-        check_name="known_success_criteria",
-        detail="ok" if not unknown_criteria else f"unsupported criteria: {unknown_criteria}",
-        evidence=unknown_criteria,
-    ))
+    deterministic_checks.append(
+        CheckResult(
+            passed=not unknown_criteria,
+            check_name="known_success_criteria",
+            detail="ok" if not unknown_criteria else f"unsupported criteria: {unknown_criteria}",
+            evidence=unknown_criteria,
+        )
+    )
     required_deterministic = task.success_criteria.get("deterministic", [])
+    criterion_checks: list[CheckResult] = []
     if required_deterministic:
         if task_check is None:
-            deterministic_checks.append(CheckResult(
-                passed=False,
-                check_name="task_specific_deterministic_checks",
-                detail=(
-                    f"{len(required_deterministic)} criteria have no executable checker; "
-                    "refusing to infer PASS from free-form text"
-                ),
-                evidence=list(required_deterministic),
-            ))
+            deterministic_checks.append(
+                CheckResult(
+                    passed=False,
+                    check_name="task_specific_deterministic_checks",
+                    detail=(
+                        f"{len(required_deterministic)} criteria have no executable checker; "
+                        "refusing to infer PASS from free-form text"
+                    ),
+                    evidence=list(required_deterministic),
+                )
+            )
         else:
             try:
                 task_check_results = task_check(task, record)
             except Exception as exc:
-                task_check_results = [CheckResult(
-                    False,
-                    "task_specific_criteria_execution",
-                    f"task checker failed: {type(exc).__name__}",
-                )]
+                task_check_results = [
+                    CheckResult(
+                        False,
+                        "task_specific_criteria_execution",
+                        f"task checker failed: {type(exc).__name__}",
+                    )
+                ]
+            criterion_checks = task_check_results
             deterministic_checks.extend(task_check_results)
             returned_names = [result.check_name for result in task_check_results]
             returned_keys = Counter(_criterion_key(name) for name in returned_names)
             required_keys = Counter(_criterion_key(name) for name in required_deterministic)
             if returned_keys != required_keys:
-                deterministic_checks.append(CheckResult(
-                    False,
-                    "task_specific_criteria_coverage",
-                    (
-                        f"checker returned criteria {returned_names!r}; expected "
-                        f"{list(required_deterministic)!r}"
-                    ),
-                    list(required_deterministic),
-                ))
+                deterministic_checks.append(
+                    CheckResult(
+                        False,
+                        "task_specific_criteria_coverage",
+                        (
+                            f"checker returned criteria {returned_names!r}; expected "
+                            f"{list(required_deterministic)!r}"
+                        ),
+                        list(required_deterministic),
+                    )
+                )
     deterministic = run_checks(deterministic_checks)
+    deterministic["criterion_checks"] = [
+        {
+            "criterion_id": result.check_name,
+            "passed": result.passed,
+            "detail": result.detail,
+            "evidence": result.evidence,
+            **({"failure": result.detail} if not result.passed else {}),
+        }
+        for result in criterion_checks
+    ]
 
     trajectory_report = check_trajectory(_trajectory_steps(record))
     trajectory = {
@@ -313,9 +345,7 @@ def evaluate_run(
             judge_result = judge(task, record, deterministic)
         except Exception as exc:
             judge_result = {"passed": False, "error": f"judge failed: {type(exc).__name__}"}
-        if not isinstance(judge_result, dict) or not isinstance(
-            judge_result.get("passed"), bool
-        ):
+        if not isinstance(judge_result, dict) or not isinstance(judge_result.get("passed"), bool):
             judge_result = {
                 "passed": False,
                 "error": "judge result must be an object with boolean passed",
@@ -352,6 +382,17 @@ def evaluate_run(
         "security": security,
         "judge": judge_result,
     }
+    if criterion_checks:
+        layers["deterministic"]["criterion_checks"] = [
+            {
+                "criterion_id": result.check_name,
+                "passed": result.passed,
+                "detail": result.detail,
+                "evidence": result.evidence,
+                **({"failure": result.detail} if not result.passed else {}),
+            }
+            for result in criterion_checks
+        ]
     passed = all(layer.get("passed") is True for layer in layers.values())
     return EvaluatedRun(record=record, passed=passed, layers=layers)
 
@@ -364,10 +405,14 @@ class EvalRunner:
         task_checks: dict[str, TaskCheck] | None = None,
         *,
         dataset_version: str = "",
+        checker_registry: TaskCheckRegistry | None = None,
+        checker_profile: CheckerProfile | None = None,
     ) -> None:
         self.adapter = adapter
         self.judge = judge
         self.task_checks = task_checks or {}
+        self.checker_registry = checker_registry
+        self.checker_profile = checker_profile
         self.dataset_version = str(dataset_version)
         self._expected_identity = {
             "model": str(adapter.model),
@@ -376,9 +421,7 @@ class EvalRunner:
         }
         isolation_level = getattr(adapter, "isolation_level", "none")
         self._isolation_level = (
-            isolation_level
-            if isolation_level in {"none", "workspace", "os"}
-            else "none"
+            isolation_level if isolation_level in {"none", "workspace", "os"} else "none"
         )
         workspace_root = getattr(adapter, "workspace_root", None)
         self._trusted_workspace_root = (
@@ -421,9 +464,7 @@ class EvalRunner:
             record.trajectory = []
         if not isinstance(record.metadata, dict):
             record.metadata = {}
-        for reserved in (
-            "workspace_root", "dataset_version", "sandbox_id", "isolation_level"
-        ):
+        for reserved in ("workspace_root", "dataset_version", "sandbox_id", "isolation_level"):
             if reserved in record.metadata:
                 errors.append(f"reserved metadata field supplied by harness: {reserved}")
                 record.metadata.pop(reserved, None)
@@ -443,9 +484,7 @@ class EvalRunner:
                 errors.append("workspace_root escapes control-plane trust root")
             else:
                 trusted_workspace = candidate
-        record.workspace_root = (
-            str(trusted_workspace) if trusted_workspace is not None else None
-        )
+        record.workspace_root = str(trusted_workspace) if trusted_workspace is not None else None
         expected_sandbox_id = (
             trusted_workspace.name
             if trusted_workspace is not None
@@ -520,20 +559,39 @@ class EvalRunner:
                         run_id=f"invalid-{uuid.uuid4().hex}",
                     )
                 record = self._canonicalize_record(task, trial, record, seen_run_ids)
+                task_check = self.task_checks.get(task.id)
+                if task_check is None and self.checker_registry is not None:
+                    registry = self.checker_registry
+                    profile = self.checker_profile
+
+                    def task_check(
+                        checked_task,
+                        checked_record,
+                        registry=registry,
+                        profile=profile,
+                    ):
+                        return registry.check(checked_task, checked_record, profile)
+
                 try:
-                    runs.append(evaluate_run(
-                        task,
-                        record,
-                        judge=self.judge,
-                        task_check=self.task_checks.get(task.id),
-                        authority_verified=True,
-                    ))
+                    runs.append(
+                        evaluate_run(
+                            task,
+                            record,
+                            judge=self.judge,
+                            task_check=task_check,
+                            authority_verified=True,
+                            checker_profile=self.checker_profile,
+                        )
+                    )
                 finally:
                     cleanup = getattr(self.adapter, "cleanup", None)
                     if callable(cleanup):
                         cleanup(record)
         report = build_report(runs)
         report["dataset_version"] = self.dataset_version
+        report["checker_profile"] = (
+            self.checker_profile.identity() if self.checker_profile is not None else None
+        )
         return report
 
 
@@ -549,18 +607,20 @@ def build_report(runs: list[EvaluatedRun]) -> dict[str, Any]:
         pass_values = [1.0 if run.passed else 0.0 for run in group]
         costs = [run.record.cost_usd or run.layers["cost"]["estimated_cost_usd"] for run in group]
         latencies = [run.record.latency_seconds for run in group]
-        aggregates.append({
-            "task_id": task_id,
-            "model": model,
-            "provider": provider,
-            "harness": harness,
-            "trials": len(group),
-            "pass_rate": statistics.fmean(pass_values),
-            "pass_variance": statistics.pvariance(pass_values),
-            "mean_cost_usd": statistics.fmean(costs),
-            "mean_latency_seconds": statistics.fmean(latencies),
-            "failure_rate": 1.0 - statistics.fmean(pass_values),
-        })
+        aggregates.append(
+            {
+                "task_id": task_id,
+                "model": model,
+                "provider": provider,
+                "harness": harness,
+                "trials": len(group),
+                "pass_rate": statistics.fmean(pass_values),
+                "pass_variance": statistics.pvariance(pass_values),
+                "mean_cost_usd": statistics.fmean(costs),
+                "mean_latency_seconds": statistics.fmean(latencies),
+                "failure_rate": 1.0 - statistics.fmean(pass_values),
+            }
+        )
 
     return {
         "schema_version": "1.0",
@@ -592,13 +652,15 @@ def write_report(report: dict[str, Any], output_dir: str | Path) -> tuple[Path, 
             f"| {row['trials']} | {row['pass_rate']:.1%} | ${row['mean_cost_usd']:.6f} "
             f"| {row['mean_latency_seconds']:.3f}s |"
         )
-    lines.extend([
-        "",
-        (
-            "> A passing framework test does not imply that any model passed this dataset. "
-            "Only records listed above are model/harness trials."
-        ),
-        "",
-    ])
+    lines.extend(
+        [
+            "",
+            (
+                "> A passing framework test does not imply that any model passed this dataset. "
+                "Only records listed above are model/harness trials."
+            ),
+            "",
+        ]
+    )
     md_path.write_text("\n".join(lines), encoding="utf-8")
     return json_path, md_path
