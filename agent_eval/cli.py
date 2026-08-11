@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--trials", type=int)
     evaluate.add_argument("--checker-profile")
     evaluate.add_argument("--judge-profile")
+    evaluate.add_argument("--trusted-record-workspace-root")
+    evaluate.add_argument(
+        "--record-isolation-level",
+        choices=("none", "workspace", "os"),
+        default="none",
+    )
     return parser
 
 
@@ -75,7 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.action == "evaluate":
         version, tasks = load_dataset(args.dataset)
-        adapter = ExecutionRecordAdapter(load_execution_records(args.execution_record))
+        adapter = ExecutionRecordAdapter(
+            load_execution_records(args.execution_record),
+            trusted_workspace_root=args.trusted_record_workspace_root,
+            trusted_isolation_level=args.record_isolation_level,
+        )
         checker_profile = None
         checker_registry = None
         if args.checker_profile:
@@ -116,7 +126,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("run requires --dataset or config.dataset")
     version, tasks = load_dataset(args.dataset)
     if args.execution_record:
-        adapter = ExecutionRecordAdapter(load_execution_records(args.execution_record))
+        adapter = ExecutionRecordAdapter(
+            load_execution_records(args.execution_record),
+            trusted_workspace_root=args.trusted_record_workspace_root,
+            trusted_isolation_level=args.record_isolation_level,
+        )
     elif args.records:
         adapter = RecordedAdapter(
             _load_records(args.records),

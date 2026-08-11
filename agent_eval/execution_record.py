@@ -6,6 +6,7 @@ import copy
 import json
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,17 @@ def _string(raw: dict[str, Any], name: str) -> str:
     return value
 
 
+def _timestamp(raw: dict[str, Any], name: str) -> datetime:
+    value = _string(raw, name)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"ExecutionRecord.{name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"ExecutionRecord.{name} must include a timezone")
+    return parsed
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionRecord:
     raw: dict[str, Any]
@@ -66,10 +78,12 @@ class ExecutionRecord:
             "model",
             "provider",
             "harness",
-            "started_at",
-            "finished_at",
         ):
             _string(raw, name)
+        started_at = _timestamp(raw, "started_at")
+        finished_at = _timestamp(raw, "finished_at")
+        if finished_at < started_at:
+            raise ValueError("ExecutionRecord.finished_at must not precede started_at")
         if raw["status"] not in {"completed", "failed", "cancelled", "timeout"}:
             raise ValueError("ExecutionRecord.status is invalid")
         if raw["isolation_level"] not in {"none", "workspace", "os"}:
@@ -112,7 +126,12 @@ class ExecutionRecord:
             raise TypeError("ExecutionRecord.metadata.trial must be a positive integer")
         return value
 
-    def to_run_record(self) -> RunRecord:
+    def to_run_record(
+        self,
+        *,
+        trusted_workspace_root: Path | None = None,
+        trusted_isolation_level: str = "none",
+    ) -> RunRecord:
         raw = self.raw
         metadata = dict(raw["metadata"])
         metadata.update(
@@ -120,8 +139,22 @@ class ExecutionRecord:
                 "execution_schema_version": "0.1",
                 "started_at": raw["started_at"],
                 "finished_at": raw["finished_at"],
+                "claimed_workspace_root": raw.get("workspace_root"),
+                "claimed_isolation_level": raw["isolation_level"],
             }
         )
+        if trusted_isolation_level not in {"none", "workspace", "os"}:
+            raise ValueError("trusted_isolation_level is invalid")
+        workspace_root: str | None = None
+        claimed_workspace = raw.get("workspace_root")
+        if trusted_workspace_root is not None and claimed_workspace:
+            trust_root = trusted_workspace_root.resolve()
+            candidate = Path(claimed_workspace).resolve(strict=False)
+            try:
+                candidate.relative_to(trust_root)
+            except ValueError as exc:
+                raise ValueError("ExecutionRecord workspace_root escapes trusted root") from exc
+            workspace_root = str(candidate)
         return RunRecord(
             task_id=raw["task_id"],
             model=raw["model"],
@@ -141,8 +174,8 @@ class ExecutionRecord:
             if raw["status"] == "completed"
             else str(metadata.get("failure_reason", raw["status"])),
             run_id=raw["run_id"],
-            workspace_root=raw.get("workspace_root"),
-            isolation_level=raw["isolation_level"],
+            workspace_root=workspace_root,
+            isolation_level=trusted_isolation_level,
             metadata=metadata,
         )
 
@@ -171,17 +204,30 @@ def load_execution_records(path: str | Path) -> list[ExecutionRecord]:
 class ExecutionRecordAdapter:
     """Convert strict external records into AE's independent RunRecord model."""
 
-    def __init__(self, records: list[ExecutionRecord]) -> None:
-        converted = [record.to_run_record() for record in records]
+    def __init__(
+        self,
+        records: list[ExecutionRecord],
+        *,
+        trusted_workspace_root: str | Path | None = None,
+        trusted_isolation_level: str = "none",
+    ) -> None:
+        trust_root = (
+            Path(trusted_workspace_root).resolve() if trusted_workspace_root is not None else None
+        )
+        converted = [
+            record.to_run_record(
+                trusted_workspace_root=trust_root,
+                trusted_isolation_level=trusted_isolation_level,
+            )
+            for record in records
+        ]
         self._records = {(record.task_id, record.trial): record for record in converted}
         first = converted[0]
         self.model = first.model
         self.provider = first.provider
         self.harness = first.harness
-        roots = {record.workspace_root for record in converted if record.workspace_root}
-        self.workspace_root = Path(next(iter(roots))).resolve() if len(roots) == 1 else None
-        levels = {record.isolation_level for record in converted}
-        self.isolation_level = next(iter(levels)) if len(levels) == 1 else "none"
+        self.workspace_root = trust_root
+        self.isolation_level = trusted_isolation_level
 
     def run(self, task: TaskCase, trial: int) -> RunRecord:
         try:

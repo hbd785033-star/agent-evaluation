@@ -85,6 +85,11 @@ def test_checker_registry_runs_builtins_profile_and_registered_custom(tmp_path):
             "schema_version": "0.1",
             "profile_id": "r2-checkers",
             "checks": {
+                "command": {
+                    "checker": "command",
+                    "command": [sys.executable, "-c", "print('ok')"],
+                },
+                "pytest": {"checker": "pytest", "path": "test_demo.py"},
                 "custom proof": {"checker": "custom", "name": "proof"},
             },
         }
@@ -147,6 +152,72 @@ def test_checker_registry_rejects_passing_result_without_evidence(tmp_path):
     assert criterion_check["failure"] == "passing checker returned no evidence"
 
 
+def test_checker_paths_cannot_escape_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (tmp_path / "secret.txt").write_text("SECRET", encoding="utf-8")
+    task = TaskCase.from_mapping(
+        {
+            "id": "escape",
+            "success_criteria": {
+                "deterministic": [
+                    {
+                        "id": "escape",
+                        "checker": "file_contains",
+                        "path": "../secret.txt",
+                        "contains": "SECRET",
+                    }
+                ]
+            },
+        }
+    )
+    record = RunRecord(
+        "escape",
+        "m",
+        "p",
+        "h",
+        1,
+        run_id="escape-run",
+        workspace_root=str(workspace),
+    )
+
+    result = TaskCheckRegistry().check(task, record)[0]
+
+    assert result.passed is False
+    assert "checker failed" in result.detail
+
+
+def test_inline_command_checker_is_not_trusted(tmp_path):
+    task = TaskCase.from_mapping(
+        {
+            "id": "command",
+            "success_criteria": {
+                "deterministic": [
+                    {
+                        "id": "command",
+                        "checker": "command",
+                        "command": [sys.executable, "-c", "print('unsafe')"],
+                    }
+                ]
+            },
+        }
+    )
+    record = RunRecord(
+        "command",
+        "m",
+        "p",
+        "h",
+        1,
+        run_id="command-run",
+        workspace_root=str(tmp_path),
+    )
+
+    result = TaskCheckRegistry().check(task, record)[0]
+
+    assert result.passed is False
+    assert "trusted checker profile" in result.detail
+
+
 def test_calibrated_judge_records_versioned_identity():
     artifact = CalibrationArtifact.from_mapping(
         {
@@ -185,6 +256,9 @@ def test_calibrated_judge_records_versioned_identity():
     assert layer["calibration_id"] == "judge-cal-v1"
     assert layer["prompt_version"] == "judge-v1"
     assert layer["rubric_version"] == "core-v1"
+    assert layer["schema_version"] == "0.1"
+    assert layer["calibrated"] is True
+    assert len(layer["artifact_sha256"]) == 64
     assert layer["evidence"] == ["fixture=perfect"]
 
 
@@ -275,6 +349,48 @@ def test_execution_record_rejects_unsupported_and_unknown_fields(tmp_path):
     with pytest.raises(TypeError, match="latency_seconds"):
         load_execution_records(nonfinite)
 
+    invalid_time = tmp_path / "invalid-time.json"
+    invalid_time.write_text(
+        json.dumps(_execution_record(started_at="not-a-date")), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="started_at"):
+        load_execution_records(invalid_time)
+
+    reversed_time = tmp_path / "reversed-time.json"
+    reversed_time.write_text(
+        json.dumps(
+            _execution_record(
+                started_at="2026-08-10T10:00:02Z",
+                finished_at="2026-08-10T10:00:01Z",
+            )
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="finished_at"):
+        load_execution_records(reversed_time)
+
+
+def test_execution_record_authority_requires_explicit_trust(tmp_path):
+    workspace = tmp_path / "claimed"
+    workspace.mkdir()
+    path = tmp_path / "claimed.json"
+    path.write_text(
+        json.dumps(_execution_record(workspace_root=str(workspace), isolation_level="os")),
+        encoding="utf-8",
+    )
+
+    untrusted = ExecutionRecordAdapter(load_execution_records(path))
+    trusted = ExecutionRecordAdapter(
+        load_execution_records(path),
+        trusted_workspace_root=tmp_path,
+        trusted_isolation_level="os",
+    )
+
+    assert untrusted.workspace_root is None
+    assert untrusted.isolation_level == "none"
+    assert trusted.workspace_root == tmp_path.resolve()
+    assert trusted.isolation_level == "os"
+
 
 def test_aao_execution_record_fixture_is_accepted(tmp_path):
     aao_root = Path(__file__).parents[2] / "adaptive-agent-orchestrator"
@@ -295,6 +411,57 @@ def test_aao_execution_record_fixture_is_accepted(tmp_path):
     records = load_execution_records(output)
 
     assert records[0].raw["harness"] == "adaptive-agent-orchestrator"
+
+
+def test_evaluate_cli_does_not_trust_execution_record_authority_claims(tmp_path):
+    root = Path(__file__).parents[1]
+    workspace = tmp_path / "claimed-workspace"
+    workspace.mkdir()
+    (workspace / "result.txt").write_text("PASS\n", encoding="utf-8")
+    record = tmp_path / "execution-record.json"
+    record.write_text(
+        json.dumps(
+            _execution_record(
+                task_id="smoke-perfect-001",
+                output="PERFECT_AGENT_EVIDENCE",
+                workspace_root=str(workspace),
+                isolation_level="os",
+            )
+        ),
+        encoding="utf-8",
+    )
+    common = [
+        "evaluate",
+        str(record),
+        "--dataset",
+        str(root / "datasets" / "smoke_tasks.yaml"),
+        "--checker-profile",
+        str(root / "profiles" / "checkers" / "smoke-v1.yaml"),
+        "--judge-profile",
+        str(root / "profiles" / "judges" / "controlled-v1.json"),
+    ]
+    untrusted_output = tmp_path / "untrusted-report"
+    trusted_output = tmp_path / "trusted-report"
+
+    untrusted_exit = main([*common, "--output-dir", str(untrusted_output)])
+    trusted_exit = main(
+        [
+            *common,
+            "--output-dir",
+            str(trusted_output),
+            "--trusted-record-workspace-root",
+            str(tmp_path),
+            "--record-isolation-level",
+            "os",
+        ]
+    )
+
+    untrusted_report = json.loads((untrusted_output / "report.json").read_text(encoding="utf-8"))
+    assert untrusted_exit == 1
+    assert untrusted_report["runs"][0]["passed"] is False
+    assert untrusted_report["runs"][0]["record"]["workspace_root"] is None
+    assert untrusted_report["runs"][0]["record"]["isolation_level"] == "none"
+    assert trusted_exit == 0
 
 
 def test_perfect_agent_cli_exits_zero_and_writes_evidence(tmp_path):

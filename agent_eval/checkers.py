@@ -52,8 +52,8 @@ class TaskCheckRegistry:
     ) -> CheckResult:
         config = dict(criterion.config)
         checker_name = criterion.checker
-        if checker_name is None and profile is not None:
-            configured = profile.checks.get(criterion.id, {})
+        configured = profile.checks.get(criterion.id, {}) if profile is not None else {}
+        if checker_name is None and configured:
             checker_name = configured.get("checker")
             config = {**{k: v for k, v in configured.items() if k != "checker"}, **config}
         if checker_name is None:
@@ -62,11 +62,11 @@ class TaskCheckRegistry:
             )
         try:
             if checker_name == "file_exists":
-                path = Path(record.workspace_root or ".") / str(config["path"])
+                path = self._safe_path(record.workspace_root, config["path"])
                 passed = path.is_file()
                 return CheckResult(passed, criterion.id, str(path), [str(path)])
             if checker_name == "file_contains":
-                path = Path(record.workspace_root or ".") / str(config["path"])
+                path = self._safe_path(record.workspace_root, config["path"])
                 needle = str(config["contains"])
                 text = path.read_text(encoding="utf-8") if path.is_file() else ""
                 return CheckResult(
@@ -76,7 +76,14 @@ class TaskCheckRegistry:
                     [str(path), f"contains={needle!r}"],
                 )
             if checker_name == "command":
-                command = config.get("command")
+                if configured.get("checker") != "command":
+                    return CheckResult(
+                        False,
+                        criterion.id,
+                        "command requires a trusted checker profile",
+                        [criterion.id],
+                    )
+                command = configured.get("command")
                 if not isinstance(command, (list, tuple)) or not command:
                     return CheckResult(
                         False, criterion.id, "command must be a non-empty argv list", []
@@ -100,9 +107,19 @@ class TaskCheckRegistry:
                     [x for x in evidence if x],
                 )
             if checker_name == "pytest":
-                path = str(config.get("path", "."))
+                if configured.get("checker") != "pytest":
+                    return CheckResult(
+                        False,
+                        criterion.id,
+                        "pytest requires a trusted checker profile",
+                        [criterion.id],
+                    )
+                path = self._safe_path(
+                    record.workspace_root,
+                    configured.get("path", config.get("path", ".")),
+                )
                 result = subprocess.run(
-                    [sys.executable, "-m", "pytest", path, "-q"],
+                    [sys.executable, "-m", "pytest", str(path), "-q"],
                     cwd=record.workspace_root,
                     capture_output=True,
                     text=True,
@@ -136,6 +153,18 @@ class TaskCheckRegistry:
             return CheckResult(
                 False, criterion.id, f"checker failed: {type(exc).__name__}", [criterion.id]
             )
+
+    @staticmethod
+    def _safe_path(workspace_root: str | None, raw_path: Any) -> Path:
+        if not workspace_root:
+            raise ValueError("checker requires a trusted workspace")
+        root = Path(workspace_root).resolve()
+        raw = Path(str(raw_path))
+        if raw.is_absolute() or ".." in raw.parts:
+            raise ValueError("checker path escapes workspace")
+        candidate = (root / raw).resolve(strict=False)
+        candidate.relative_to(root)
+        return candidate
 
     def check(
         self, task: Any, record: Any, profile: CheckerProfile | None = None

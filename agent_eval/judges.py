@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -73,7 +74,12 @@ class CalibrationArtifact:
         return cls.from_mapping(json.loads(Path(path).read_text(encoding="utf-8")))
 
     def identity(self) -> dict[str, Any]:
+        artifact = asdict(self)
+        artifact_sha256 = hashlib.sha256(
+            json.dumps(artifact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         return {
+            "schema_version": self.schema_version,
             "calibration_id": self.calibration_id,
             "judge_model": self.judge_model,
             "prompt_version": self.prompt_version,
@@ -81,6 +87,8 @@ class CalibrationArtifact:
             "golden_dataset_version": self.golden_dataset_version,
             "sample_count": self.sample_count,
             "agreement_score": self.agreement_score,
+            "calibrated": self.calibrated,
+            "artifact_sha256": artifact_sha256,
         }
 
 
