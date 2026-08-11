@@ -12,7 +12,11 @@ import pytest
 from agent_eval.adapters import RecordedAdapter
 from agent_eval.checkers import CheckerProfile, TaskCheckRegistry
 from agent_eval.cli import main
-from agent_eval.execution_record import ExecutionRecordAdapter, load_execution_records
+from agent_eval.execution_record import (
+    ExecutionRecordAdapter,
+    WorkspaceAuthority,
+    load_execution_records,
+)
 from agent_eval.judges import CalibrationArtifact, ProfileJudgeAdapter
 from agent_eval.models import RunRecord, SuccessCriterion, TaskCase
 from agent_eval.runner import EvalRunner
@@ -371,25 +375,90 @@ def test_execution_record_rejects_unsupported_and_unknown_fields(tmp_path):
 
 
 def test_execution_record_authority_requires_explicit_trust(tmp_path):
-    workspace = tmp_path / "claimed"
-    workspace.mkdir()
+    assigned = tmp_path / "assigned"
+    assigned.mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "result.txt").write_text("PASS\n", encoding="utf-8")
     path = tmp_path / "claimed.json"
     path.write_text(
-        json.dumps(_execution_record(workspace_root=str(workspace), isolation_level="os")),
+        json.dumps(_execution_record(workspace_root=str(victim), isolation_level="os")),
         encoding="utf-8",
+    )
+    authority = WorkspaceAuthority.from_mapping(
+        {
+            "schema_version": "0.1",
+            "trusted_workspace_root": str(tmp_path),
+            "isolation_level": "os",
+            "workspaces": [
+                {
+                    "task_id": "execution-task",
+                    "trial": 1,
+                    "workspace_root": str(assigned),
+                }
+            ],
+        }
     )
 
     untrusted = ExecutionRecordAdapter(load_execution_records(path))
-    trusted = ExecutionRecordAdapter(
-        load_execution_records(path),
-        trusted_workspace_root=tmp_path,
-        trusted_isolation_level="os",
-    )
+    trusted = ExecutionRecordAdapter(load_execution_records(path), authority=authority)
+    converted = trusted.run(TaskCase(id="execution-task", prompt=""), 1)
 
     assert untrusted.workspace_root is None
     assert untrusted.isolation_level == "none"
     assert trusted.workspace_root == tmp_path.resolve()
     assert trusted.isolation_level == "os"
+    assert converted.workspace_root == str(assigned.resolve())
+    assert converted.metadata["claimed_workspace_root"] == str(victim)
+
+
+def test_execution_record_cannot_substitute_sibling_workspace(tmp_path):
+    assigned = tmp_path / "assigned"
+    assigned.mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "result.txt").write_text("PASS\n", encoding="utf-8")
+    path = tmp_path / "record.json"
+    path.write_text(
+        json.dumps(_execution_record(workspace_root=str(victim), isolation_level="os")),
+        encoding="utf-8",
+    )
+    authority = WorkspaceAuthority.from_mapping(
+        {
+            "schema_version": "0.1",
+            "trusted_workspace_root": str(tmp_path),
+            "isolation_level": "os",
+            "workspaces": [
+                {
+                    "task_id": "execution-task",
+                    "trial": 1,
+                    "workspace_root": str(assigned),
+                }
+            ],
+        }
+    )
+    task = TaskCase.from_mapping(
+        {
+            "id": "execution-task",
+            "success_criteria": {
+                "deterministic": [
+                    {
+                        "id": "result",
+                        "checker": "file_contains",
+                        "path": "result.txt",
+                        "contains": "PASS",
+                    }
+                ]
+            },
+        }
+    )
+    adapter = ExecutionRecordAdapter(load_execution_records(path), authority=authority)
+    record = adapter.run(task, 1)
+
+    result = TaskCheckRegistry().check(task, record)[0]
+
+    assert record.workspace_root == str(assigned.resolve())
+    assert result.passed is False
 
 
 def test_aao_execution_record_fixture_is_accepted(tmp_path):
@@ -433,16 +502,18 @@ def test_aao_execution_record_fixture_is_accepted(tmp_path):
 
 def test_evaluate_cli_does_not_trust_execution_record_authority_claims(tmp_path):
     root = Path(__file__).parents[1]
-    workspace = tmp_path / "claimed-workspace"
-    workspace.mkdir()
-    (workspace / "result.txt").write_text("PASS\n", encoding="utf-8")
+    assigned = tmp_path / "assigned-workspace"
+    assigned.mkdir()
+    victim = tmp_path / "victim-workspace"
+    victim.mkdir()
+    (victim / "result.txt").write_text("PASS\n", encoding="utf-8")
     record = tmp_path / "execution-record.json"
     record.write_text(
         json.dumps(
             _execution_record(
                 task_id="smoke-perfect-001",
                 output="PERFECT_AGENT_EVIDENCE",
-                workspace_root=str(workspace),
+                workspace_root=str(victim),
                 isolation_level="os",
             )
         ),
@@ -459,19 +530,40 @@ def test_evaluate_cli_does_not_trust_execution_record_authority_claims(tmp_path)
         str(root / "profiles" / "judges" / "controlled-v1.json"),
     ]
     untrusted_output = tmp_path / "untrusted-report"
+    substituted_output = tmp_path / "substituted-report"
     trusted_output = tmp_path / "trusted-report"
+    authority = tmp_path / "workspace-authority.json"
+    authority.write_text(
+        json.dumps(
+            {
+                "schema_version": "0.1",
+                "trusted_workspace_root": str(tmp_path),
+                "isolation_level": "os",
+                "workspaces": [
+                    {
+                        "task_id": "smoke-perfect-001",
+                        "trial": 1,
+                        "workspace_root": str(assigned),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     untrusted_exit = main([*common, "--output-dir", str(untrusted_output)])
-    trusted_exit = main(
+    substituted_exit = main(
         [
             *common,
             "--output-dir",
-            str(trusted_output),
-            "--trusted-record-workspace-root",
-            str(tmp_path),
-            "--record-isolation-level",
-            "os",
+            str(substituted_output),
+            "--workspace-authority",
+            str(authority),
         ]
+    )
+    (assigned / "result.txt").write_text("PASS\n", encoding="utf-8")
+    trusted_exit = main(
+        [*common, "--output-dir", str(trusted_output), "--workspace-authority", str(authority)]
     )
 
     untrusted_report = json.loads((untrusted_output / "report.json").read_text(encoding="utf-8"))
@@ -479,6 +571,7 @@ def test_evaluate_cli_does_not_trust_execution_record_authority_claims(tmp_path)
     assert untrusted_report["runs"][0]["passed"] is False
     assert untrusted_report["runs"][0]["record"]["workspace_root"] is None
     assert untrusted_report["runs"][0]["record"]["isolation_level"] == "none"
+    assert substituted_exit == 1
     assert trusted_exit == 0
 
 

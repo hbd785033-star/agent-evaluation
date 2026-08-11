@@ -131,13 +131,12 @@ python -m agent_eval run \
   --model kimi-k3 \
   --provider moonshot \
   --harness kimi-code \
-  --trusted-record-workspace-root reports/imported-workspaces \
-  --record-isolation-level os \
   --records exported-runs.json \
   --output-dir reports/rescored
 ```
 
-重放时，记录内自报的 `workspace_root`、`dataset_version`、`sandbox_id` 和 `isolation_level` 不被信任。
+重放时，记录内自报的 `workspace_root`、`dataset_version`、`sandbox_id` 和 `isolation_level`
+不被信任。没有控制面 authority 时，所有路径与隔离相关检查 fail-closed。
 
 ## 评估 AAO ExecutionRecord 0.1
 
@@ -146,11 +145,31 @@ python -m agent_eval evaluate execution-record.json \
   --dataset datasets/smoke_tasks.yaml \
   --checker-profile profiles/checkers/smoke-v1.yaml \
   --judge-profile profiles/judges/controlled-v1.json \
+  --workspace-authority workspace-authority.json \
   --output-dir reports/aao
 ```
 
+`workspace-authority.json` 是控制面生成的独立 artifact，按任务和 trial 精确绑定 workspace：
+
+```json
+{
+  "schema_version": "0.1",
+  "trusted_workspace_root": "/absolute/path/to/imported-workspaces",
+  "isolation_level": "os",
+  "workspaces": [
+    {
+      "task_id": "smoke-perfect-001",
+      "trial": 1,
+      "workspace_root": "/absolute/path/to/imported-workspaces/smoke-perfect-001-trial-1"
+    }
+  ]
+}
+```
+
 输入必须精确匹配 `ExecutionRecord 0.1`。未知字段、缺失字段、重复 run ID 或
-不支持的版本会被明确拒绝，不会静默忽略。`--trusted-record-workspace-root` 与 `--record-isolation-level` 必须来自生成记录的控制面；缺失时路径证据和隔离声明会 fail-closed。
+不支持的版本会被明确拒绝，不会静默忽略。外部记录不能选择可信根下的任意 sibling
+workspace；只有 `--workspace-authority` 中与 `(task_id, trial)` 精确匹配的路径才会成为
+checker authority。缺失、重复或越界 binding 会 fail-closed。
 
 数据集中的 `file_exists` / `file_contains` 路径会 canonicalize 到可信 workspace；绝对路径、
 `..` 与 symlink 逃逸会被拒绝。`command` / `pytest` 不接受数据集内联 argv，只能由调用者

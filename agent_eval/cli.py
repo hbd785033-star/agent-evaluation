@@ -11,7 +11,7 @@ import yaml
 from .adapters import CommandAgentAdapter, RecordedAdapter
 from .checkers import CheckerProfile, TaskCheckRegistry
 from .dataset import load_dataset
-from .execution_record import ExecutionRecordAdapter, load_execution_records
+from .execution_record import ExecutionRecordAdapter, WorkspaceAuthority, load_execution_records
 from .judges import controlled_profile_judge
 from .models import RunRecord
 from .runner import EvalRunner, write_report
@@ -42,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--preserve-workspaces", action="store_true")
     run.add_argument("--checker-profile")
     run.add_argument("--judge-profile")
+    run.add_argument("--workspace-authority")
     run.add_argument("--config", help="evaluation YAML config; CLI values take precedence")
     run.add_argument(
         "--trusted-record-workspace-root",
@@ -68,12 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--trials", type=int)
     evaluate.add_argument("--checker-profile")
     evaluate.add_argument("--judge-profile")
-    evaluate.add_argument("--trusted-record-workspace-root")
-    evaluate.add_argument(
-        "--record-isolation-level",
-        choices=("none", "workspace", "os"),
-        default="none",
-    )
+    evaluate.add_argument("--workspace-authority")
     return parser
 
 
@@ -81,10 +77,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.action == "evaluate":
         version, tasks = load_dataset(args.dataset)
+        authority = (
+            WorkspaceAuthority.load(args.workspace_authority) if args.workspace_authority else None
+        )
         adapter = ExecutionRecordAdapter(
-            load_execution_records(args.execution_record),
-            trusted_workspace_root=args.trusted_record_workspace_root,
-            trusted_isolation_level=args.record_isolation_level,
+            load_execution_records(args.execution_record), authority=authority
         )
         checker_profile = None
         checker_registry = None
@@ -118,7 +115,13 @@ def main(argv: list[str] | None = None) -> int:
         config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8")) or {}
         if not isinstance(config, dict):
             raise SystemExit("--config must contain a YAML object")
-        for name in ("dataset", "checker_profile", "judge_profile", "trials"):
+        for name in (
+            "dataset",
+            "checker_profile",
+            "judge_profile",
+            "trials",
+            "workspace_authority",
+        ):
             value = config.get(name)
             if value is not None and getattr(args, name, None) in (None, ""):
                 setattr(args, name, value)
@@ -126,10 +129,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("run requires --dataset or config.dataset")
     version, tasks = load_dataset(args.dataset)
     if args.execution_record:
+        if args.trusted_record_workspace_root or args.record_isolation_level != "none":
+            raise SystemExit("ExecutionRecord workspace authority requires --workspace-authority")
+        authority = (
+            WorkspaceAuthority.load(args.workspace_authority) if args.workspace_authority else None
+        )
         adapter = ExecutionRecordAdapter(
-            load_execution_records(args.execution_record),
-            trusted_workspace_root=args.trusted_record_workspace_root,
-            trusted_isolation_level=args.record_isolation_level,
+            load_execution_records(args.execution_record), authority=authority
         )
     elif args.records:
         adapter = RecordedAdapter(

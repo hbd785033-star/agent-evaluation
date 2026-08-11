@@ -56,6 +56,80 @@ def _timestamp(raw: dict[str, Any], name: str) -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceAuthority:
+    """Control-plane workspace bindings for imported execution records."""
+
+    trusted_workspace_root: Path
+    isolation_level: str
+    workspaces: dict[tuple[str, int], Path]
+    schema_version: str = "0.1"
+
+    @classmethod
+    def from_mapping(cls, raw: Any) -> WorkspaceAuthority:
+        if not isinstance(raw, dict):
+            raise TypeError("workspace authority must be an object")
+        expected = {
+            "schema_version",
+            "trusted_workspace_root",
+            "isolation_level",
+            "workspaces",
+        }
+        unknown = sorted(set(raw) - expected)
+        missing = sorted(expected - set(raw))
+        if unknown or missing:
+            raise ValueError(
+                f"invalid workspace authority fields: missing={missing}, unknown={unknown}"
+            )
+        if raw["schema_version"] != "0.1":
+            raise ValueError("workspace authority schema_version must be 0.1")
+        root_raw = raw["trusted_workspace_root"]
+        if not isinstance(root_raw, str) or not root_raw.strip():
+            raise TypeError("workspace authority trusted_workspace_root must be a string")
+        root = Path(root_raw).resolve()
+        if not root.is_dir():
+            raise ValueError("workspace authority trusted_workspace_root must exist")
+        isolation_level = raw["isolation_level"]
+        if isolation_level not in {"none", "workspace", "os"}:
+            raise ValueError("workspace authority isolation_level is invalid")
+        rows = raw["workspaces"]
+        if not isinstance(rows, list) or not rows:
+            raise TypeError("workspace authority workspaces must be a non-empty list")
+        workspaces: dict[tuple[str, int], Path] = {}
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {
+                "task_id",
+                "trial",
+                "workspace_root",
+            }:
+                raise ValueError("workspace authority entry fields are invalid")
+            task_id = row["task_id"]
+            trial = row["trial"]
+            workspace_raw = row["workspace_root"]
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise TypeError("workspace authority task_id must be a non-empty string")
+            if not isinstance(trial, int) or isinstance(trial, bool) or trial < 1:
+                raise TypeError("workspace authority trial must be a positive integer")
+            if not isinstance(workspace_raw, str) or not workspace_raw.strip():
+                raise TypeError("workspace authority workspace_root must be a string")
+            workspace = Path(workspace_raw).resolve()
+            try:
+                workspace.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("workspace authority entry escapes trusted root") from exc
+            if not workspace.is_dir():
+                raise ValueError("workspace authority workspace_root must exist")
+            key = (task_id, trial)
+            if key in workspaces:
+                raise ValueError(f"duplicate workspace authority binding: {key}")
+            workspaces[key] = workspace
+        return cls(root, isolation_level, workspaces)
+
+    @classmethod
+    def load(cls, path: str | Path) -> WorkspaceAuthority:
+        return cls.from_mapping(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionRecord:
     raw: dict[str, Any]
 
@@ -129,8 +203,8 @@ class ExecutionRecord:
     def to_run_record(
         self,
         *,
-        trusted_workspace_root: Path | None = None,
-        trusted_isolation_level: str = "none",
+        authoritative_workspace: Path | None = None,
+        authoritative_isolation_level: str = "none",
     ) -> RunRecord:
         raw = self.raw
         metadata = dict(raw["metadata"])
@@ -143,18 +217,11 @@ class ExecutionRecord:
                 "claimed_isolation_level": raw["isolation_level"],
             }
         )
-        if trusted_isolation_level not in {"none", "workspace", "os"}:
-            raise ValueError("trusted_isolation_level is invalid")
-        workspace_root: str | None = None
-        claimed_workspace = raw.get("workspace_root")
-        if trusted_workspace_root is not None and claimed_workspace:
-            trust_root = trusted_workspace_root.resolve()
-            candidate = Path(claimed_workspace).resolve(strict=False)
-            try:
-                candidate.relative_to(trust_root)
-            except ValueError as exc:
-                raise ValueError("ExecutionRecord workspace_root escapes trusted root") from exc
-            workspace_root = str(candidate)
+        if authoritative_isolation_level not in {"none", "workspace", "os"}:
+            raise ValueError("authoritative_isolation_level is invalid")
+        workspace_root = (
+            str(authoritative_workspace.resolve()) if authoritative_workspace is not None else None
+        )
         return RunRecord(
             task_id=raw["task_id"],
             model=raw["model"],
@@ -175,7 +242,7 @@ class ExecutionRecord:
             else str(metadata.get("failure_reason", raw["status"])),
             run_id=raw["run_id"],
             workspace_root=workspace_root,
-            isolation_level=trusted_isolation_level,
+            isolation_level=authoritative_isolation_level,
             metadata=metadata,
         )
 
@@ -208,26 +275,30 @@ class ExecutionRecordAdapter:
         self,
         records: list[ExecutionRecord],
         *,
-        trusted_workspace_root: str | Path | None = None,
-        trusted_isolation_level: str = "none",
+        authority: WorkspaceAuthority | None = None,
     ) -> None:
-        trust_root = (
-            Path(trusted_workspace_root).resolve() if trusted_workspace_root is not None else None
-        )
-        converted = [
-            record.to_run_record(
-                trusted_workspace_root=trust_root,
-                trusted_isolation_level=trusted_isolation_level,
+        converted = []
+        for record in records:
+            key = (record.raw["task_id"], record.trial)
+            if authority is not None and key not in authority.workspaces:
+                raise ValueError(f"workspace authority missing binding: {key}")
+            converted.append(
+                record.to_run_record(
+                    authoritative_workspace=(
+                        authority.workspaces[key] if authority is not None else None
+                    ),
+                    authoritative_isolation_level=(
+                        authority.isolation_level if authority is not None else "none"
+                    ),
+                )
             )
-            for record in records
-        ]
         self._records = {(record.task_id, record.trial): record for record in converted}
         first = converted[0]
         self.model = first.model
         self.provider = first.provider
         self.harness = first.harness
-        self.workspace_root = trust_root
-        self.isolation_level = trusted_isolation_level
+        self.workspace_root = authority.trusted_workspace_root if authority is not None else None
+        self.isolation_level = authority.isolation_level if authority is not None else "none"
 
     def run(self, task: TaskCase, trial: int) -> RunRecord:
         try:
