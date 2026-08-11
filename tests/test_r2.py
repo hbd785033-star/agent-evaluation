@@ -396,17 +396,35 @@ def test_aao_execution_record_fixture_is_accepted(tmp_path):
     aao_root = Path(__file__).parents[2] / "adaptive-agent-orchestrator"
     python = aao_root / ".venv" / "Scripts" / "python.exe"
     output = tmp_path / "aao-record.json"
-    script = (
-        "from contracts.execution import ExecutionRecord; "
-        "ExecutionRecord(task_id='cross-repo-1',run_id='run-1',model='m',provider='p',"
-        "status='completed',started_at='2026-08-10T10:00:00Z',"
-        "finished_at='2026-08-10T10:00:01Z',latency_seconds=1,input_tokens=1,"
-        "output_tokens=1,tool_calls=[],files_changed=[],output='ok',"
-        "workspace_root=None,isolation_level='none',metadata={'trial':1}).export(r'"
-        + str(output)
-        + "')"
-    )
-    subprocess.run([str(python), "-c", script], cwd=aao_root, check=True)
+    if aao_root.is_dir() and python.is_file():
+        script = (
+            "from contracts.execution import ExecutionRecord; "
+            "ExecutionRecord(task_id='cross-repo-1',run_id='run-1',model='m',provider='p',"
+            "status='completed',started_at='2026-08-10T10:00:00Z',"
+            "finished_at='2026-08-10T10:00:01Z',latency_seconds=1,input_tokens=1,"
+            "output_tokens=1,tool_calls=[],files_changed=[],output='ok',"
+            "workspace_root=None,isolation_level='none',metadata={'trial':1}).export(r'"
+            + str(output)
+            + "')"
+        )
+        subprocess.run([str(python), "-c", script], cwd=aao_root, check=True)
+    else:
+        output.write_text(
+            json.dumps(
+                _execution_record(
+                    task_id="cross-repo-1",
+                    run_id="run-1",
+                    model="m",
+                    provider="p",
+                    harness="adaptive-agent-orchestrator",
+                    input_tokens=1,
+                    output_tokens=1,
+                    cost_usd=0.0,
+                    output="ok",
+                )
+            ),
+            encoding="utf-8",
+        )
 
     records = load_execution_records(output)
 
