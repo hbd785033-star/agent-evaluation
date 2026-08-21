@@ -1,0 +1,11 @@
+{
+  "schema_version": "0.1",
+  "calibration_id": "controlled-smoke-v1",
+  "judge_model": "controlled-fake",
+  "prompt_version": "controlled-v1",
+  "rubric_version": "smoke-v1",
+  "golden_dataset_version": "controlled-fixtures-v1",
+  "sample_count": 3,
+  "agreement_score": 1.0,
+  "calibrated": true
+}

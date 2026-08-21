@@ -1,4 +1,5 @@
 """Adapters that turn real harness executions into RunRecord objects."""
+
 from __future__ import annotations
 
 import copy
@@ -34,6 +35,8 @@ class CommandAgentAdapter:
     ``workspace`` and policy-constrained evaluations fail closed unless records
     come from a control-plane-verified OS sandbox.
     """
+
+    identity_fields_are_observed = False
 
     def __init__(
         self,
@@ -98,7 +101,8 @@ class CommandAgentAdapter:
         started: float,
         error: str,
         *,
-        output: str = "",
+        output: str | None = None,
+        exit_status: str = "failed",
     ) -> RunRecord:
         return RunRecord(
             task_id=task.id,
@@ -108,9 +112,9 @@ class CommandAgentAdapter:
             trial=trial,
             output=output,
             latency_seconds=time.perf_counter() - started,
-            exit_status="failed",
+            exit_status=exit_status,
             error=error,
-            run_id=f"runner-{uuid.uuid4().hex}",
+            run_id=None,
             **self._authority(workspace),
         )
 
@@ -125,7 +129,7 @@ class CommandAgentAdapter:
                 "allowed_files": task.allowed_files,
                 "forbidden_files": task.forbidden_files,
                 "forbidden_actions": task.forbidden_actions,
-                "success_criteria": task.success_criteria,
+                "success_criteria": task.success_criteria_mapping(),
                 "limits": task.limits,
             },
             "trial": trial,
@@ -146,7 +150,16 @@ class CommandAgentAdapter:
                 timeout=self.timeout_seconds,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            return self._failed_record(
+                task,
+                trial,
+                workspace,
+                started,
+                str(exc),
+                exit_status="timeout",
+            )
+        except OSError as exc:
             return self._failed_record(task, trial, workspace, started, str(exc))
 
         if completed.returncode != 0:
@@ -183,18 +196,23 @@ class CommandAgentAdapter:
                 provider=self.provider,
                 harness=self.harness,
                 trial=trial,
-                output=raw.get("output", ""),
-                tool_calls=raw.get("tool_calls", []),
-                files_changed=raw.get("files_changed", []),
-                trajectory=raw.get("trajectory", []),
-                input_tokens=raw.get("input_tokens", usage.get("input_tokens", 0)),
-                output_tokens=raw.get("output_tokens", usage.get("output_tokens", 0)),
-                cached_tokens=raw.get("cached_tokens", usage.get("cached_tokens", 0)),
-                cost_usd=raw.get("cost_usd", usage.get("cost_usd", 0.0)),
+                output=raw.get("output"),
+                tool_calls=raw.get("tool_calls"),
+                files_changed=raw.get("files_changed"),
+                trajectory=raw.get("trajectory"),
+                input_tokens=raw.get("input_tokens", usage.get("input_tokens")),
+                output_tokens=raw.get("output_tokens", usage.get("output_tokens")),
+                cached_tokens=raw.get("cached_tokens", usage.get("cached_tokens")),
+                cost_usd=raw.get("cost_usd", usage.get("cost_usd")),
+                cost_semantics=(
+                    "reported"
+                    if raw.get("cost_usd", usage.get("cost_usd")) is not None
+                    else None
+                ),
                 latency_seconds=time.perf_counter() - started,
                 exit_status=raw.get("exit_status", "completed"),
                 error=raw.get("error"),
-                run_id=raw.get("run_id") or f"runner-{uuid.uuid4().hex}",
+                run_id=raw.get("run_id"),
                 metadata=metadata,
                 **self._authority(workspace),
             )
@@ -222,6 +240,8 @@ class CommandAgentAdapter:
 class RecordedAdapter:
     """Replay exported records with optional control-plane trust context."""
 
+    identity_fields_are_observed = True
+
     def __init__(
         self,
         records: Sequence[RunRecord],
@@ -232,14 +252,15 @@ class RecordedAdapter:
         workspace_root: str | Path | None = None,
         isolation_level: str = "none",
     ) -> None:
+        keys = [(record.task_id, record.trial) for record in records]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate RecordedAdapter task_id/trial")
         self._records = {(record.task_id, record.trial): record for record in records}
         first = records[0] if records else None
         self.model = model or (first.model if first else "recorded")
         self.provider = provider or (first.provider if first else "recorded")
         self.harness = harness or (first.harness if first else "recorded")
-        self.workspace_root = (
-            Path(workspace_root).resolve() if workspace_root is not None else None
-        )
+        self.workspace_root = Path(workspace_root).resolve() if workspace_root is not None else None
         if isolation_level not in {"none", "workspace", "os"}:
             raise ValueError("isolation_level must be none, workspace, or os")
         self.isolation_level = isolation_level

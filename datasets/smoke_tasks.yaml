@@ -1,0 +1,18 @@
+version: "smoke-v1"
+tasks:
+  - id: smoke-perfect-001
+    category: coding
+    description: Controlled perfect-agent smoke task
+    prompt: Create result.txt containing PASS and report controlled evidence.
+    success_criteria:
+      deterministic:
+        - id: result_exists
+          checker: file_exists
+          path: result.txt
+        - id: result_contains_pass
+          checker: file_contains
+          path: result.txt
+          contains: PASS
+      llm_judge:
+        - controlled fixture output includes the expected evidence marker
+    trials: 1

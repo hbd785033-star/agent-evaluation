@@ -2,7 +2,7 @@
 
 from .adapters import AgentAdapter, CommandAgentAdapter, RecordedAdapter
 from .dataset import load_dataset
-from .models import EvaluatedRun, RunRecord, TaskCase
+from .models import EvaluatedRun, RunRecord, SuccessCriterion, TaskCase
 
 __all__ = [
     "AgentAdapter",
@@ -10,6 +10,7 @@ __all__ = [
     "EvaluatedRun",
     "RecordedAdapter",
     "RunRecord",
+    "SuccessCriterion",
     "TaskCase",
     "load_dataset",
 ]
