@@ -4,15 +4,15 @@
 
 Development status:
 
-**PAUSED**
+**AE-1B IMPLEMENTATION AND REAL VERTICAL SLICE COMPLETE — REVIEW / CI / MERGE PENDING**
 
 AE-1 implementation:
 
-**NOT STARTED IN THIS FOLLOW-UP PHASE**
+**TECHNICALLY COMPLETE AT `a79865ab570fa7ce8df3c16dff710eebb982448f`; NOT YET MERGED**
 
 Current next technical phase:
 
-**PR #2 reconciliation / bounded salvage decision**
+**independent review → exact-head CI → PR #2 merge gate**
 
 This document is the canonical cross-computer continuation checkpoint. It is
 tracked in GitHub so the next session needs no prior computer, local worktree,
@@ -491,3 +491,106 @@ CONTINUATION_CRITICAL_LOCAL_ONLY_FILES = 0
 ```
 
 The handoff document itself is the durable continuation state.
+
+## AE-1B Evidence Truth Repair Checkpoint
+
+This section supersedes the earlier planning-only and paused-state instructions above while
+preserving them as historical context.
+
+### Current immutable producer
+
+AAO producer truth was repaired and merged before this consumer phase:
+
+- repository: `hbd785033-star/adaptive-agent-orchestrator`;
+- branch: `master`;
+- merge SHA: `5a1ab3c844b7c19e1c73e13bb07abd7fe375f1fb`;
+- ExecutionRecord schema: `0.1` (unchanged).
+
+### AE-1B implementation candidate
+
+The bounded consumer repair is committed on the existing PR #2 branch:
+
+- implementation commit: `a79865ab570fa7ce8df3c16dff710eebb982448f`;
+- parent/checkpoint: `e2d46e8adb4b45ea842d00c9eed580291d4829e6`;
+- branch: `feat/r2-closed-loop-hardening`.
+
+The implementation preserves these boundaries:
+
+```text
+UNKNOWN != ZERO
+UNKNOWN != EMPTY
+experiment identity != observed execution provenance
+planned runtime != selected runtime != observed runtime
+AAO Verified != AE Judged
+claimed workspace != trusted workspace authority
+workspace isolation != OS sandbox
+reported/producer-estimated cost != AE-derived estimate != billed cost
+```
+
+Specific behavior:
+
+- producer-nullable scalars, collections, output, workspace claims and isolation claims remain
+  nullable through ingestion, `RunRecord`, evaluation and JSON reporting;
+- `run_id=None` remains incomplete execution identity and is never replaced by an AE UUID;
+- duplicate checks apply to non-null real run IDs, while duplicate task/trial bindings still fail
+  closed;
+- AAO model/provider/harness observations are retained separately from explicit
+  `execution-record` experiment labels;
+- planned, selected and actually invoked runtime identities remain separate nullable fields;
+- unavailable trajectory is reported as `unavailable`, `evaluated=false`, with no fake zero-step
+  statistics;
+- missing files/action evidence fails closed when policy requires it;
+- source cost and its semantics remain unchanged; AE estimates are separate and missing-aware;
+- aggregates expose total, cost-available and cost-missing sample counts and never insert fake
+  zeroes into means;
+- existing `WorkspaceAuthority` exact `(task_id, trial)` binding remains the sole workspace trust
+  source;
+- `RecordedAdapter` now rejects duplicate task/trial keys before dictionary construction.
+
+### Deterministic verification
+
+On the implementation snapshot:
+
+- focused AE-1B/ExecutionRecord/runner regressions: `77 passed, 1 skipped`;
+- full repository suite: `97 passed, 1 skipped`;
+- repository-standard Ruff scope: PASS;
+- `git diff --check`: PASS.
+
+The full-repository Ruff invocation still reports pre-existing issues in `tests/test_agent.py`,
+which is outside the repository-standard CI Ruff scope and unchanged by AE-1B.
+
+### Real cross-repository vertical slice
+
+The mandatory truth slice used the actual producer and consumer CLIs:
+
+```text
+AAO master@5a1ab3c
+→ aao run "AE-1B deterministic evidence truth slice" --mock --record-out record.json
+→ actual MockHermesAdapter / Orchestrator / _build_execution_record / export
+→ agent-eval evaluate record.json --dataset dataset.yaml --output-dir reports
+→ load_execution_records / ExecutionRecordAdapter / EvalRunner / write_report
+```
+
+Local artifacts:
+
+- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/record.json`;
+- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports/report.json`;
+- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports/report.md`.
+
+Mechanical truth assertions passed. The real record retained `cached_tokens=null`,
+`tool_calls=null`, `output=null`, and observed `files_changed=[]`. AE retained those distinctions,
+kept the real runtime run ID, separated mock/fixture observations from experiment labels, did not
+promote workspace claims, reported trajectory unavailable, labelled cost
+`producer_estimated`, and emitted both normal report artifacts. The evaluated run happened to
+PASS, but that PASS is not the Evidence Truth closure criterion.
+
+### Review, CI and merge state at this checkpoint
+
+- independent AE-1B review: PENDING;
+- exact-head GitHub Actions for the final PR head: PENDING;
+- PR #2 draft state: expected OPEN / DRAFT / UNMERGED;
+- merge: NOT PERFORMED.
+
+Do not reinterpret this candidate checkpoint as merged closure. A later external review/CI/merge
+record must bind to the exact final PR head. The authoritative current state is recoverable from
+PR #2 plus the immutable SHAs above.
