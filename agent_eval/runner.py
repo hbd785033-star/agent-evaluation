@@ -9,7 +9,6 @@ import math
 import posixpath
 import re
 import statistics
-import uuid
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -72,8 +71,15 @@ def _is_finite_number(value: Any) -> bool:
         return False
 
 
-def _trajectory_steps(record: RunRecord) -> list[TrajectoryStep]:
-    source = record.trajectory or record.tool_calls
+def _trajectory_source(record: RunRecord) -> tuple[list[dict[str, Any]] | None, str]:
+    if isinstance(record.trajectory, list):
+        return record.trajectory, "complete"
+    if isinstance(record.tool_calls, list):
+        return record.tool_calls, "partial"
+    return None, "unavailable"
+
+
+def _trajectory_steps(source: list[dict[str, Any]]) -> list[TrajectoryStep]:
     steps: list[TrajectoryStep] = []
     for index, raw in enumerate(source):
         arguments = raw.get("arguments", raw.get("args", {}))
@@ -96,7 +102,8 @@ def _trajectory_steps(record: RunRecord) -> list[TrajectoryStep]:
 def _commands_and_paths(record: RunRecord) -> tuple[list[str], list[str]]:
     commands: list[str] = []
     paths: list[str] = []
-    for call in record.tool_calls:
+    tool_calls = record.tool_calls if isinstance(record.tool_calls, list) else []
+    for call in tool_calls:
         args = call.get("arguments", call.get("args", {}))
         if not isinstance(args, dict):
             continue
@@ -106,7 +113,8 @@ def _commands_and_paths(record: RunRecord) -> tuple[list[str], list[str]]:
         for key in ("path", "file", "filepath"):
             if key in args:
                 paths.append(str(args[key]))
-    paths.extend(record.files_changed)
+    if isinstance(record.files_changed, list):
+        paths.extend(record.files_changed)
     return commands, paths
 
 
@@ -126,7 +134,7 @@ def evaluate_run(
             check_name="run_completed",
             detail=record.error or record.exit_status,
         ),
-        check_no_api_key_leak(record.output),
+        *([check_no_api_key_leak(record.output)] if isinstance(record.output, str) else []),
         CheckResult(
             passed=not integrity_errors,
             check_name="run_record_integrity",
@@ -137,6 +145,27 @@ def evaluate_run(
     workspace_raw = record.workspace_root
     workspace = Path(workspace_raw).resolve() if workspace_raw else None
     commands, paths = _commands_and_paths(record)
+    file_constraints = bool(task.allowed_files or task.forbidden_files)
+    if file_constraints and record.files_changed is None:
+        deterministic_checks.append(
+            CheckResult(
+                False,
+                "files_changed_evidence_available",
+                "file constraints require files_changed evidence; source reported unavailable",
+                [],
+            )
+        )
+    action_evidence_available = record.tool_calls is not None or record.trajectory is not None
+    if task.forbidden_actions and not action_evidence_available:
+        deterministic_checks.append(
+            CheckResult(
+                False,
+                "action_evidence_available",
+                "forbidden-action policy requires tool or trajectory evidence",
+                [],
+            )
+        )
+
     if paths and workspace is None:
         deterministic_checks.append(
             CheckResult(
@@ -146,7 +175,7 @@ def evaluate_run(
                 paths,
             )
         )
-    if task.allowed_files:
+    if task.allowed_files and isinstance(record.files_changed, list):
         deterministic_checks.append(
             check_no_forbidden_files_modified(
                 task.allowed_files,
@@ -171,8 +200,10 @@ def evaluate_run(
             evidence=forbidden_path_hits,
         )
     )
+    trajectory_source, trajectory_completeness = _trajectory_source(record)
+    trajectory_steps = _trajectory_steps(trajectory_source) if trajectory_source is not None else []
     action_text = _normalized_action(
-        "\n".join([*commands, *(step.tool_name for step in _trajectory_steps(record))])
+        "\n".join([*commands, *(step.tool_name for step in trajectory_steps)])
     )
     forbidden_action_hits = [
         action for action in task.forbidden_actions if _normalized_action(action) in action_text
@@ -286,61 +317,160 @@ def evaluate_run(
         for result in criterion_checks
     ]
 
-    trajectory_report = check_trajectory(_trajectory_steps(record))
-    trajectory = {
-        "passed": trajectory_report.passed,
-        "violations": trajectory_report.violations,
-        "warnings": trajectory_report.warnings,
-        "stats": trajectory_report.stats,
-    }
+    if trajectory_source is None:
+        trajectory_required = bool(task.forbidden_actions)
+        trajectory = {
+            "passed": not trajectory_required,
+            "status": "unavailable",
+            "evaluated": False,
+            "violations": (
+                ["trajectory evidence unavailable for required action policy"]
+                if trajectory_required
+                else []
+            ),
+            "warnings": [],
+            "stats": None,
+        }
+    else:
+        trajectory_report = check_trajectory(trajectory_steps)
+        trajectory = {
+            "passed": trajectory_report.passed,
+            "status": trajectory_completeness,
+            "evaluated": True,
+            "violations": trajectory_report.violations,
+            "warnings": trajectory_report.warnings,
+            "stats": trajectory_report.stats,
+        }
 
-    estimated = evaluate_cost(
-        input_tokens=record.input_tokens,
-        output_tokens=record.output_tokens,
-        cache_read_tokens=record.cached_tokens,
-        tool_calls=len(record.tool_calls),
-        retries=int(record.metadata.get("retries", 0)),
-        sub_agents=int(record.metadata.get("sub_agents", 0)),
-        model=record.model,
-        duration_seconds=record.latency_seconds,
+    token_values_known = all(
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        for value in (record.input_tokens, record.output_tokens, record.cached_tokens)
     )
-    effective_cost = record.cost_usd if record.cost_usd > 0 else estimated.estimated_cost_usd
+    tool_count = len(record.tool_calls) if isinstance(record.tool_calls, list) else None
+    retries_raw = record.metadata.get("retries") if isinstance(record.metadata, dict) else None
+    sub_agents_raw = (
+        record.metadata.get("sub_agents") if isinstance(record.metadata, dict) else None
+    )
+    retries = (
+        retries_raw
+        if isinstance(retries_raw, int) and not isinstance(retries_raw, bool) and retries_raw >= 0
+        else None
+    )
+    sub_agents = (
+        sub_agents_raw
+        if isinstance(sub_agents_raw, int)
+        and not isinstance(sub_agents_raw, bool)
+        and sub_agents_raw >= 0
+        else None
+    )
+    derived_estimate = None
+    if (
+        token_values_known
+        and tool_count is not None
+        and retries is not None
+        and sub_agents is not None
+        and isinstance(record.observed_model, str)
+        and record.observed_model.strip()
+        and _is_finite_number(record.latency_seconds)
+        and record.latency_seconds >= 0
+    ):
+        derived_estimate = evaluate_cost(
+            input_tokens=record.input_tokens,
+            output_tokens=record.output_tokens,
+            cache_read_tokens=record.cached_tokens,
+            tool_calls=tool_count,
+            retries=retries,
+            sub_agents=sub_agents,
+            model=record.observed_model,
+            duration_seconds=record.latency_seconds,
+        ).estimated_cost_usd
+    source_cost_valid = (
+        record.cost_usd is not None
+        and _is_finite_number(record.cost_usd)
+        and record.cost_usd >= 0
+    )
+    reported_cost = float(record.cost_usd) if source_cost_valid else None
+    cost_basis = reported_cost if reported_cost is not None else derived_estimate
+    cost_basis_semantics = (
+        record.cost_semantics or "reported"
+        if reported_cost is not None
+        else "ae_derived_estimate"
+        if derived_estimate is not None
+        else None
+    )
     cost_violations: list[str] = []
     max_cost = task.limits.get("max_cost_usd")
     max_tools = task.limits.get("max_tool_calls")
     max_agents = task.limits.get("max_agents")
-    if max_cost is not None and effective_cost > float(max_cost):
-        cost_violations.append(f"cost ${effective_cost:.6f} exceeds ${float(max_cost):.6f}")
-    if max_tools is not None and len(record.tool_calls) > int(max_tools):
-        cost_violations.append(f"tool calls {len(record.tool_calls)} exceed {int(max_tools)}")
-    sub_agents = int(record.metadata.get("sub_agents", 0))
-    if max_agents is not None and sub_agents > int(max_agents):
-        cost_violations.append(f"sub-agents {sub_agents} exceed {int(max_agents)}")
+    if max_cost is not None:
+        if cost_basis is None:
+            cost_violations.append("cost evidence unavailable for max_cost_usd")
+        elif cost_basis > float(max_cost):
+            cost_violations.append(f"cost ${cost_basis:.6f} exceeds ${float(max_cost):.6f}")
+    if max_tools is not None:
+        if tool_count is None:
+            cost_violations.append("tool-call evidence unavailable for max_tool_calls")
+        elif tool_count > int(max_tools):
+            cost_violations.append(f"tool calls {tool_count} exceed {int(max_tools)}")
+    if max_agents is not None:
+        if sub_agents is None:
+            cost_violations.append("sub-agent evidence unavailable for max_agents")
+        elif sub_agents > int(max_agents):
+            cost_violations.append(f"sub-agents {sub_agents} exceed {int(max_agents)}")
+    cost_status = (
+        "invalid"
+        if record.cost_usd is not None and not source_cost_valid
+        else "available"
+        if cost_basis is not None
+        else "unavailable"
+    )
     cost = {
-        "passed": not cost_violations,
-        "estimated_cost_usd": effective_cost,
+        "passed": not cost_violations and cost_status != "invalid",
+        "status": cost_status,
+        "source_cost_usd": record.cost_usd,
+        "reported_cost_usd": reported_cost,
+        "reported_cost_semantics": record.cost_semantics if reported_cost is not None else None,
+        "derived_estimated_cost_usd": derived_estimate,
+        "estimated_cost_usd": derived_estimate,
+        "limit_basis_usd": cost_basis,
+        "limit_basis_semantics": cost_basis_semantics,
         "violations": cost_violations,
         "stats": {
             "input_tokens": record.input_tokens,
             "output_tokens": record.output_tokens,
             "cached_tokens": record.cached_tokens,
-            "tool_calls": len(record.tool_calls),
+            "tool_calls": tool_count,
             "latency_seconds": record.latency_seconds,
         },
     }
 
+    output_known = isinstance(record.output, str)
     security = run_security_suite(
-        output=record.output,
+        output=record.output if output_known else "",
         commands=commands,
         paths_accessed=paths,
         allowed_roots=_allowed_roots(task.allowed_files),
         user_content=task.prompt,
-        agent_response=record.output,
+        agent_response=record.output if output_known else "",
         base_dir=workspace or Path.cwd(),
     )
+    security["completeness"] = (
+        "complete"
+        if output_known and record.tool_calls is not None and record.files_changed is not None
+        else "partial"
+        if output_known or record.tool_calls is not None or record.files_changed is not None
+        else "unavailable"
+    )
+    security["output_evidence"] = "available" if output_known else "unavailable"
 
     required_judge = task.success_criteria.get("llm_judge", [])
-    if judge is not None and getattr(judge, "calibrated", False) is True:
+    if not output_known and (judge is not None or required_judge):
+        judge_result = {
+            "passed": False,
+            "skipped": True,
+            "reason": "output evidence unavailable; refusing to judge invented empty output",
+        }
+    elif judge is not None and getattr(judge, "calibrated", False) is True:
         try:
             judge_result = judge(task, record, deterministic)
         except Exception as exc:
@@ -447,23 +577,15 @@ class EvalRunner:
                     f"{field_name} mismatch: {getattr(record, field_name)!r} != {expected_value!r}"
                 )
             setattr(record, field_name, expected_value)
-        if not isinstance(record.run_id, str) or not record.run_id.strip():
-            record.run_id = f"invalid-{uuid.uuid4().hex}"
-        elif record.run_id in seen_run_ids:
-            errors.append(f"duplicate run_id: {record.run_id}")
-        seen_run_ids.add(record.run_id)
-        if not isinstance(record.output, str):
-            record.output = ""
-        if record.error is not None and not isinstance(record.error, str):
-            record.error = "invalid non-string harness error"
-        if not isinstance(record.tool_calls, list):
-            record.tool_calls = []
-        if not isinstance(record.files_changed, list):
-            record.files_changed = []
-        if not isinstance(record.trajectory, list):
-            record.trajectory = []
+        if isinstance(record.run_id, str) and record.run_id.strip():
+            if record.run_id in seen_run_ids:
+                errors.append(f"duplicate run_id: {record.run_id}")
+            seen_run_ids.add(record.run_id)
+        elif record.run_id is not None:
+            errors.append("run_id must be a non-empty string or null")
         if not isinstance(record.metadata, dict):
-            record.metadata = {}
+            errors.append("metadata must be an object")
+            record.metadata = {"invalid_metadata_type": type(record.metadata).__name__}
         for reserved in ("workspace_root", "dataset_version", "sandbox_id", "isolation_level"):
             if reserved in record.metadata:
                 errors.append(f"reserved metadata field supplied by harness: {reserved}")
@@ -499,23 +621,7 @@ class EvalRunner:
         if record.isolation_level != self._isolation_level:
             errors.append("isolation_level mismatch")
         record.isolation_level = self._isolation_level
-        for field_name in ("input_tokens", "output_tokens", "cached_tokens"):
-            value = getattr(record, field_name)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                setattr(record, field_name, 0)
-        if record.cached_tokens > record.input_tokens:
-            record.cached_tokens = 0
-        for field_name in ("cost_usd", "latency_seconds"):
-            value = getattr(record, field_name)
-            if not _is_finite_number(value) or value < 0:
-                setattr(record, field_name, 0.0)
-        for field_name in ("retries", "sub_agents"):
-            value = record.metadata.get(field_name, 0)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                record.metadata[field_name] = 0
         if errors:
-            record.exit_status = "failed"
-            record.error = "run record integrity failure: " + "; ".join(errors)
             record.metadata["integrity_errors"] = errors
         return record
 
@@ -545,7 +651,7 @@ class EvalRunner:
                         trial,
                         exit_status="failed",
                         error="adapter execution failed",
-                        run_id=f"invalid-{uuid.uuid4().hex}",
+                        run_id=None,
                     )
                 if not isinstance(record, RunRecord):
                     record = RunRecord(
@@ -556,7 +662,7 @@ class EvalRunner:
                         trial,
                         exit_status="failed",
                         error="adapter returned a non-RunRecord value",
-                        run_id=f"invalid-{uuid.uuid4().hex}",
+                        run_id=None,
                     )
                 record = self._canonicalize_record(task, trial, record, seen_run_ids)
                 task_check = self.task_checks.get(task.id)
@@ -605,19 +711,54 @@ def build_report(runs: list[EvaluatedRun]) -> dict[str, Any]:
     aggregates: list[dict[str, Any]] = []
     for (task_id, model, provider, harness), group in sorted(groups.items()):
         pass_values = [1.0 if run.passed else 0.0 for run in group]
-        costs = [run.record.cost_usd or run.layers["cost"]["estimated_cost_usd"] for run in group]
-        latencies = [run.record.latency_seconds for run in group]
+        cost_populations: dict[str, list[float]] = {}
+        for run in group:
+            cost = run.record.cost_usd
+            if cost is None or not _is_finite_number(cost) or cost < 0:
+                continue
+            semantics = run.record.cost_semantics or "reported"
+            cost_populations.setdefault(semantics, []).append(float(cost))
+        cost_available = sum(len(values) for values in cost_populations.values())
+        serialized_populations = {
+            semantics: {
+                "sample_count": len(values),
+                "mean_cost_usd": statistics.fmean(values),
+            }
+            for semantics, values in sorted(cost_populations.items())
+        }
+        if len(cost_populations) == 1:
+            mean_cost_semantics, available_costs = next(iter(cost_populations.items()))
+            mean_cost = statistics.fmean(available_costs)
+        else:
+            mean_cost_semantics = None
+            mean_cost = None
+        latencies = [
+            float(run.record.latency_seconds)
+            for run in group
+            if _is_finite_number(run.record.latency_seconds)
+            and run.record.latency_seconds >= 0
+        ]
         aggregates.append(
             {
                 "task_id": task_id,
                 "model": model,
                 "provider": provider,
                 "harness": harness,
+                "experiment_model": model,
+                "experiment_provider": provider,
+                "experiment_harness": harness,
+                "identity_semantics": "experiment_labels",
                 "trials": len(group),
                 "pass_rate": statistics.fmean(pass_values),
                 "pass_variance": statistics.pvariance(pass_values),
-                "mean_cost_usd": statistics.fmean(costs),
-                "mean_latency_seconds": statistics.fmean(latencies),
+                "cost_available_samples": cost_available,
+                "cost_missing_samples": len(group) - cost_available,
+                "mean_cost_usd": mean_cost,
+                "mean_cost_semantics": mean_cost_semantics,
+                "cost_populations": serialized_populations,
+                "latency_available_samples": len(latencies),
+                "latency_missing_samples": len(group) - len(latencies),
+                "mean_latency_seconds": statistics.fmean(latencies) if latencies else None,
                 "failure_rate": 1.0 - statistics.fmean(pass_values),
             }
         )
@@ -643,21 +784,35 @@ def write_report(report: dict[str, Any], output_dir: str | Path) -> tuple[Path, 
         "",
         f"Runs: **{report['run_count']}**",
         "",
-        "| Task | Model | Provider | Harness | Trials | Pass rate | Mean cost | Mean latency |",
-        "|---|---|---|---|---:|---:|---:|---:|",
+        (
+            "| Task | Experiment model | Experiment provider | Experiment harness | Trials "
+            "| Pass rate | Available cost | Cost samples | Missing cost | Mean latency |"
+        ),
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for row in report["aggregates"]:
+        mean_cost = (
+            f"${row['mean_cost_usd']:.6f} ({row['mean_cost_semantics']})"
+            if row["mean_cost_usd"] is not None
+            else "N/A"
+        )
+        mean_latency = (
+            f"{row['mean_latency_seconds']:.3f}s"
+            if row["mean_latency_seconds"] is not None
+            else "N/A"
+        )
         lines.append(
-            f"| {row['task_id']} | {row['model']} | {row['provider']} | {row['harness']} "
-            f"| {row['trials']} | {row['pass_rate']:.1%} | ${row['mean_cost_usd']:.6f} "
-            f"| {row['mean_latency_seconds']:.3f}s |"
+            f"| {row['task_id']} | {row['experiment_model']} | {row['experiment_provider']} "
+            f"| {row['experiment_harness']} | {row['trials']} | {row['pass_rate']:.1%} "
+            f"| {mean_cost} | {row['cost_available_samples']} "
+            f"| {row['cost_missing_samples']} | {mean_latency} |"
         )
     lines.extend(
         [
             "",
             (
-                "> A passing framework test does not imply that any model passed this dataset. "
-                "Only records listed above are model/harness trials."
+                "> Experiment labels are grouping identity, not observed execution provenance. "
+                "Missing evidence is excluded from numeric aggregates."
             ),
             "",
         ]

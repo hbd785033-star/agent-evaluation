@@ -111,7 +111,7 @@ class CommandAgentAdapter:
             latency_seconds=time.perf_counter() - started,
             exit_status="failed",
             error=error,
-            run_id=f"runner-{uuid.uuid4().hex}",
+            run_id=None,
             **self._authority(workspace),
         )
 
@@ -195,7 +195,7 @@ class CommandAgentAdapter:
                 latency_seconds=time.perf_counter() - started,
                 exit_status=raw.get("exit_status", "completed"),
                 error=raw.get("error"),
-                run_id=raw.get("run_id") or f"runner-{uuid.uuid4().hex}",
+                run_id=raw.get("run_id"),
                 metadata=metadata,
                 **self._authority(workspace),
             )
@@ -233,6 +233,9 @@ class RecordedAdapter:
         workspace_root: str | Path | None = None,
         isolation_level: str = "none",
     ) -> None:
+        keys = [(record.task_id, record.trial) for record in records]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate RecordedAdapter task_id/trial")
         self._records = {(record.task_id, record.trial): record for record in records}
         first = records[0] if records else None
         self.model = model or (first.model if first else "recorded")

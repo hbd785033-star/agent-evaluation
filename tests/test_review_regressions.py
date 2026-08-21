@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -388,7 +389,8 @@ def test_spoofed_identity_duplicate_run_and_negative_usage_fail():
     )
     assert all(not run["passed"] for run in report["runs"])
     assert all(run["record"]["task_id"] == "expected-task" for run in report["runs"])
-    assert report["aggregates"][0]["mean_cost_usd"] >= 0
+    assert report["aggregates"][0]["mean_cost_usd"] is None
+    assert report["aggregates"][0]["cost_missing_samples"] == 2
 
 
 @pytest.mark.parametrize("bad_cost", [float("nan"), float("inf"), float("-inf")])
@@ -402,7 +404,9 @@ def test_non_finite_telemetry_fails_closed(bad_cost):
         TaskCase(id="t", prompt="x")
     ])
     assert report["runs"][0]["passed"] is False
-    assert report["runs"][0]["record"]["cost_usd"] == 0.0
+    stored_cost = report["runs"][0]["record"]["cost_usd"]
+    assert math.isnan(stored_cost) if math.isnan(bad_cost) else stored_cost == bad_cost
+    assert report["aggregates"][0]["mean_cost_usd"] is None
 
 
 def test_huge_integer_telemetry_fails_without_overflowing():
@@ -462,10 +466,11 @@ def test_unhashable_run_id_and_malformed_metadata_fail_without_crashing():
         TaskCase(id="t", prompt="x")
     ])
     assert report["runs"][0]["passed"] is False
-    assert report["runs"][0]["record"]["run_id"].startswith("invalid-")
+    assert report["runs"][0]["record"]["run_id"] == ["not", "hashable"]
+    assert "invalid-" not in json.dumps(report)
 
 
-def test_malformed_success_json_becomes_failed_record(tmp_path):
+def test_nullable_success_json_preserves_unknown_tool_evidence(tmp_path):
     harness = tmp_path / "malformed.py"
     harness.write_text(
         "import json; print(json.dumps({'tool_calls': None}))", encoding="utf-8"
@@ -477,8 +482,9 @@ def test_malformed_success_json_becomes_failed_record(tmp_path):
         workspace_root=tmp_path / "workspaces",
     )
     record = adapter.run(TaskCase(id="t", prompt="x"), 1)
-    assert record.exit_status == "failed"
-    assert "invalid harness fields" in (record.error or "")
+    assert record.exit_status == "completed"
+    assert record.tool_calls is None
+    assert record.run_id is None
     adapter.cleanup(record)
 
 
@@ -537,6 +543,7 @@ def test_failure_cases_are_executed_and_known_failures_are_detected(tmp_path):
             files_changed=[] if clean else ["src/config.py"],
             run_id=f"reg-code-{'clean' if clean else 'fault'}-{trial}",
             workspace_root=str(root), sandbox_id=root.name, isolation_level="os",
+            metadata={"sub_agents": 0},
         )
 
     def research_record(*, clean):
@@ -551,6 +558,7 @@ def test_failure_cases_are_executed_and_known_failures_are_detected(tmp_path):
             output=url,
             run_id=f"reg-url-{'clean' if clean else 'fault'}",
             workspace_root=str(root), sandbox_id=root.name, isolation_level="os",
+            metadata={"sub_agents": 0},
         )
 
     def code_checker(task, record):

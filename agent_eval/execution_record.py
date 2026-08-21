@@ -1,4 +1,4 @@
-"""Strict ExecutionRecord 0.1 ingestion boundary."""
+"""Strict, truth-preserving ExecutionRecord 0.1 ingestion boundary."""
 
 from __future__ import annotations
 
@@ -34,13 +34,38 @@ _FIELDS = {
     "isolation_level",
     "metadata",
 }
-_REQUIRED = _FIELDS - {"workspace_root"}
+_REQUIRED = {"task_id", "status", "started_at", "finished_at", "latency_seconds"}
+_DEFAULTS: dict[str, Any] = {
+    "schema_version": "0.1",
+    "run_id": None,
+    "model": None,
+    "provider": None,
+    "harness": "adaptive-agent-orchestrator",
+    "input_tokens": None,
+    "output_tokens": None,
+    "cached_tokens": None,
+    "cost_usd": None,
+    "tool_calls": None,
+    "files_changed": None,
+    "output": None,
+    "workspace_root": None,
+    "isolation_level": None,
+    "metadata": {},
+}
+_EXPERIMENT_LABEL = "execution-record"
 
 
 def _string(raw: dict[str, Any], name: str) -> str:
     value = raw.get(name)
     if not isinstance(value, str) or not value.strip():
         raise TypeError(f"ExecutionRecord.{name} must be a non-empty string")
+    return value
+
+
+def _optional_string(raw: dict[str, Any], name: str) -> str | None:
+    value = raw.get(name)
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"ExecutionRecord.{name} must be a string or null")
     return value
 
 
@@ -53,6 +78,43 @@ def _timestamp(raw: dict[str, Any], name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"ExecutionRecord.{name} must include a timezone")
     return parsed
+
+
+def _optional_nonnegative_int(raw: dict[str, Any], name: str) -> int | None:
+    value = raw.get(name)
+    if value is not None and (
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+    ):
+        raise TypeError(f"ExecutionRecord.{name} must be a non-negative integer or null")
+    return value
+
+
+def _nonnegative_number(raw: dict[str, Any], name: str) -> int | float:
+    value = raw.get(name)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise TypeError(f"ExecutionRecord.{name} must be a non-negative number")
+    return value
+
+
+def _optional_nonnegative_number(raw: dict[str, Any], name: str) -> int | float | None:
+    value = raw.get(name)
+    if value is not None:
+        _nonnegative_number(raw, name)
+    return value
+
+
+def _nested_string(raw: Any, *path: str) -> str | None:
+    current = raw
+    for name in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(name)
+    return current if isinstance(current, str) and current.strip() else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,61 +199,59 @@ class ExecutionRecord:
     def from_mapping(cls, raw: Any) -> ExecutionRecord:
         if not isinstance(raw, dict):
             raise TypeError("ExecutionRecord must be an object")
-        version = raw.get("schema_version")
-        if version != "0.1":
-            raise ValueError(f"unsupported ExecutionRecord schema_version: {version!r}")
         unknown = sorted(set(raw) - _FIELDS)
         if unknown:
             raise ValueError(f"unknown ExecutionRecord fields: {unknown}")
         missing = sorted(_REQUIRED - set(raw))
         if missing:
             raise ValueError(f"missing ExecutionRecord fields: {missing}")
-        for name in (
-            "task_id",
-            "run_id",
-            "model",
-            "provider",
-            "harness",
-        ):
-            _string(raw, name)
-        started_at = _timestamp(raw, "started_at")
-        finished_at = _timestamp(raw, "finished_at")
+        normalized = copy.deepcopy(_DEFAULTS)
+        normalized.update(copy.deepcopy(raw))
+        version = normalized.get("schema_version")
+        if version != "0.1":
+            raise ValueError(f"unsupported ExecutionRecord schema_version: {version!r}")
+        _string(normalized, "task_id")
+        _string(normalized, "harness")
+        for name in ("run_id", "model", "provider"):
+            _optional_string(normalized, name)
+        started_at = _timestamp(normalized, "started_at")
+        finished_at = _timestamp(normalized, "finished_at")
         if finished_at < started_at:
             raise ValueError("ExecutionRecord.finished_at must not precede started_at")
-        if raw["status"] not in {"completed", "failed", "cancelled", "timeout"}:
+        if normalized["status"] not in {"completed", "failed", "cancelled", "timeout"}:
             raise ValueError("ExecutionRecord.status is invalid")
-        if raw["isolation_level"] not in {"none", "workspace", "os"}:
+        isolation = normalized["isolation_level"]
+        if isolation is not None and isolation not in {"none", "workspace", "os"}:
             raise ValueError("ExecutionRecord.isolation_level is invalid")
         for name in ("input_tokens", "output_tokens", "cached_tokens"):
-            value = raw[name]
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise TypeError(f"ExecutionRecord.{name} must be a non-negative integer")
-        for name in ("latency_seconds", "cost_usd"):
-            value = raw[name]
-            if (
-                not isinstance(value, (int, float))
-                or isinstance(value, bool)
-                or not math.isfinite(value)
-                or value < 0
-            ):
-                raise TypeError(f"ExecutionRecord.{name} must be a non-negative number")
-        if raw["cached_tokens"] > raw["input_tokens"]:
+            _optional_nonnegative_int(normalized, name)
+        _nonnegative_number(normalized, "latency_seconds")
+        _optional_nonnegative_number(normalized, "cost_usd")
+        cached = normalized["cached_tokens"]
+        inputs = normalized["input_tokens"]
+        if cached is not None and inputs is not None and cached > inputs:
             raise ValueError("ExecutionRecord.cached_tokens cannot exceed input_tokens")
-        if not isinstance(raw["output"], str):
-            raise TypeError("ExecutionRecord.output must be a string")
-        if not isinstance(raw["tool_calls"], list) or not all(
-            isinstance(item, dict) for item in raw["tool_calls"]
+        if normalized["output"] is not None and not isinstance(normalized["output"], str):
+            raise TypeError("ExecutionRecord.output must be a string or null")
+        tool_calls = normalized["tool_calls"]
+        if tool_calls is not None and (
+            not isinstance(tool_calls, list)
+            or not all(isinstance(item, dict) for item in tool_calls)
         ):
-            raise TypeError("ExecutionRecord.tool_calls must be a list of objects")
-        if not isinstance(raw["files_changed"], list) or not all(
-            isinstance(item, str) for item in raw["files_changed"]
+            raise TypeError("ExecutionRecord.tool_calls must be a list of objects or null")
+        files_changed = normalized["files_changed"]
+        if files_changed is not None and (
+            not isinstance(files_changed, list)
+            or not all(isinstance(item, str) for item in files_changed)
         ):
-            raise TypeError("ExecutionRecord.files_changed must be a list of strings")
-        if raw.get("workspace_root") is not None and not isinstance(raw["workspace_root"], str):
+            raise TypeError("ExecutionRecord.files_changed must be a list of strings or null")
+        if normalized["workspace_root"] is not None and not isinstance(
+            normalized["workspace_root"], str
+        ):
             raise TypeError("ExecutionRecord.workspace_root must be a string or null")
-        if not isinstance(raw["metadata"], dict):
+        if not isinstance(normalized["metadata"], dict):
             raise TypeError("ExecutionRecord.metadata must be an object")
-        return cls(copy.deepcopy(raw))
+        return cls(normalized)
 
     @property
     def trial(self) -> int:
@@ -205,16 +265,54 @@ class ExecutionRecord:
         *,
         authoritative_workspace: Path | None = None,
         authoritative_isolation_level: str = "none",
+        experiment_model: str = _EXPERIMENT_LABEL,
+        experiment_provider: str = _EXPERIMENT_LABEL,
+        experiment_harness: str = _EXPERIMENT_LABEL,
     ) -> RunRecord:
         raw = self.raw
-        metadata = dict(raw["metadata"])
+        source_metadata = copy.deepcopy(raw["metadata"])
+        planned_runtime = _nested_string(source_metadata, "planned", "runtime_plan", "executor")
+        selected_runtime = _nested_string(
+            source_metadata, "planned", "runtime_selection", "selected_runtime"
+        )
+        observed = source_metadata.get("observed")
+        observed_runtime = (
+            _nested_string(observed, "runtime_adapter")
+            if isinstance(observed, dict) and observed.get("runtime_adapter_invoked") is True
+            else None
+        )
+        metadata = dict(source_metadata)
         metadata.update(
             {
                 "execution_schema_version": "0.1",
                 "started_at": raw["started_at"],
                 "finished_at": raw["finished_at"],
                 "claimed_workspace_root": raw.get("workspace_root"),
-                "claimed_isolation_level": raw["isolation_level"],
+                "claimed_isolation_level": raw.get("isolation_level"),
+                "experiment_identity": {
+                    "model": experiment_model,
+                    "provider": experiment_provider,
+                    "harness": experiment_harness,
+                },
+                "evidence_completeness": {
+                    "execution_identity": "partial" if raw["run_id"] is None else "complete",
+                    "usage": (
+                        "complete"
+                        if all(raw[name] is not None for name in (
+                            "input_tokens",
+                            "output_tokens",
+                            "cached_tokens",
+                            "cost_usd",
+                        ))
+                        else "partial"
+                    ),
+                    "tool_calls": "unavailable" if raw["tool_calls"] is None else "complete",
+                    "files_changed": (
+                        "unavailable" if raw["files_changed"] is None else "complete"
+                    ),
+                    "output": "unavailable" if raw["output"] is None else "complete",
+                    "trajectory": "unavailable",
+                },
             }
         )
         if authoritative_isolation_level not in {"none", "workspace", "os"}:
@@ -224,23 +322,33 @@ class ExecutionRecord:
         )
         return RunRecord(
             task_id=raw["task_id"],
-            model=raw["model"],
-            provider=raw["provider"],
-            harness=raw["harness"],
+            model=experiment_model,
+            provider=experiment_provider,
+            harness=experiment_harness,
             trial=self.trial,
             output=raw["output"],
             tool_calls=copy.deepcopy(raw["tool_calls"]),
-            files_changed=list(raw["files_changed"]),
+            files_changed=copy.deepcopy(raw["files_changed"]),
+            trajectory=None,
             input_tokens=raw["input_tokens"],
             output_tokens=raw["output_tokens"],
             cached_tokens=raw["cached_tokens"],
-            cost_usd=float(raw["cost_usd"]),
+            cost_usd=(float(raw["cost_usd"]) if raw["cost_usd"] is not None else None),
+            cost_semantics=("producer_estimated" if raw["cost_usd"] is not None else None),
             latency_seconds=float(raw["latency_seconds"]),
             exit_status=raw["status"],
-            error=None
-            if raw["status"] == "completed"
-            else str(metadata.get("failure_reason", raw["status"])),
+            error=(
+                None
+                if raw["status"] == "completed"
+                else str(metadata.get("failure_reason") or raw["status"])
+            ),
             run_id=raw["run_id"],
+            observed_model=raw["model"],
+            observed_provider=raw["provider"],
+            observed_harness=raw["harness"],
+            planned_runtime=planned_runtime,
+            selected_runtime=selected_runtime,
+            observed_runtime=observed_runtime,
             workspace_root=workspace_root,
             isolation_level=authoritative_isolation_level,
             metadata=metadata,
@@ -262,14 +370,18 @@ def load_execution_records(path: str | Path) -> list[ExecutionRecord]:
     keys = [(record.raw["task_id"], record.trial) for record in records]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate ExecutionRecord task_id/trial")
-    run_ids = [record.raw["run_id"] for record in records]
+    run_ids = [
+        record.raw["run_id"]
+        for record in records
+        if isinstance(record.raw["run_id"], str) and record.raw["run_id"].strip()
+    ]
     if len(run_ids) != len(set(run_ids)):
         raise ValueError("duplicate ExecutionRecord run_id")
     return records
 
 
 class ExecutionRecordAdapter:
-    """Convert strict external records into AE's independent RunRecord model."""
+    """Convert external records while keeping experiment and execution identity separate."""
 
     def __init__(
         self,
@@ -277,9 +389,13 @@ class ExecutionRecordAdapter:
         *,
         authority: WorkspaceAuthority | None = None,
     ) -> None:
-        converted = []
+        converted: list[RunRecord] = []
+        seen_keys: set[tuple[str, int]] = set()
         for record in records:
             key = (record.raw["task_id"], record.trial)
+            if key in seen_keys:
+                raise ValueError(f"duplicate ExecutionRecord task_id/trial: {key}")
+            seen_keys.add(key)
             if authority is not None and key not in authority.workspaces:
                 raise ValueError(f"workspace authority missing binding: {key}")
             converted.append(
@@ -292,11 +408,12 @@ class ExecutionRecordAdapter:
                     ),
                 )
             )
+        if not converted:
+            raise ValueError("ExecutionRecordAdapter requires at least one record")
         self._records = {(record.task_id, record.trial): record for record in converted}
-        first = converted[0]
-        self.model = first.model
-        self.provider = first.provider
-        self.harness = first.harness
+        self.model = _EXPERIMENT_LABEL
+        self.provider = _EXPERIMENT_LABEL
+        self.harness = _EXPERIMENT_LABEL
         self.workspace_root = authority.trusted_workspace_root if authority is not None else None
         self.isolation_level = authority.isolation_level if authority is not None else "none"
 

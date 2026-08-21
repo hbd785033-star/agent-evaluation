@@ -171,25 +171,32 @@ class TaskCase:
 
 @dataclass(slots=True)
 class RunRecord:
-    """Provider-neutral record of one real model/harness trial."""
+    """One evaluation trial with experiment labels separate from execution provenance."""
 
     task_id: str
     model: str
     provider: str
     harness: str
     trial: int
-    output: str = ""
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    files_changed: list[str] = field(default_factory=list)
-    trajectory: list[dict[str, Any]] = field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_tokens: int = 0
-    cost_usd: float = 0.0
+    output: str | None = ""
+    tool_calls: list[dict[str, Any]] | None = field(default_factory=list)
+    files_changed: list[str] | None = field(default_factory=list)
+    trajectory: list[dict[str, Any]] | None = field(default_factory=list)
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
+    cached_tokens: int | None = 0
+    cost_usd: float | None = 0.0
     latency_seconds: float = 0.0
     exit_status: str = "completed"
     error: str | None = None
     run_id: str | None = None
+    observed_model: str | None = None
+    observed_provider: str | None = None
+    observed_harness: str | None = None
+    planned_runtime: str | None = None
+    selected_runtime: str | None = None
+    observed_runtime: str | None = None
+    cost_semantics: str | None = "reported"
     dataset_version: str = ""
     sandbox_id: str = ""
     workspace_root: str | None = None
@@ -197,10 +204,10 @@ class RunRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def integrity_errors(self) -> list[str]:
-        """Return schema and accounting invariant violations without raising."""
+        """Return schema and accounting invariant violations without changing evidence."""
         errors: list[str] = []
-        if not isinstance(self.output, str):
-            errors.append("output must be a string")
+        if self.output is not None and not isinstance(self.output, str):
+            errors.append("output must be a string or null")
         if self.error is not None and not isinstance(self.error, str):
             errors.append("error must be a string or null")
         if self.run_id is not None and not isinstance(self.run_id, str):
@@ -208,7 +215,19 @@ class RunRecord:
         for name in ("task_id", "model", "provider", "harness"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
-                errors.append(f"{name} must be a non-empty string")
+                errors.append(f"{name} must be a non-empty experiment label")
+        for name in (
+            "observed_model",
+            "observed_provider",
+            "observed_harness",
+            "planned_runtime",
+            "selected_runtime",
+            "observed_runtime",
+            "cost_semantics",
+        ):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                errors.append(f"{name} must be a non-empty string or null")
         if not isinstance(self.trial, int) or isinstance(self.trial, bool) or self.trial < 1:
             errors.append("trial must be a positive integer")
         if not isinstance(self.dataset_version, str):
@@ -219,53 +238,60 @@ class RunRecord:
             errors.append("workspace_root must be a string or null")
         if self.isolation_level not in {"none", "workspace", "os"}:
             errors.append("isolation_level is invalid")
-        if not isinstance(self.tool_calls, list) or not all(
-            isinstance(item, dict) for item in self.tool_calls
+        if self.tool_calls is not None:
+            if not isinstance(self.tool_calls, list) or not all(
+                isinstance(item, dict) for item in self.tool_calls
+            ):
+                errors.append("tool_calls must be a list of objects or null")
+            elif any(
+                key in item and not isinstance(item[key], dict)
+                for item in self.tool_calls
+                for key in ("arguments", "args")
+            ):
+                errors.append("tool call arguments must be objects")
+        if self.files_changed is not None:
+            if not isinstance(self.files_changed, list) or not all(
+                isinstance(item, str) for item in self.files_changed
+            ):
+                errors.append("files_changed must be a list of strings or null")
+            elif any("\x00" in item for item in self.files_changed):
+                errors.append("files_changed paths must not contain NUL")
+        if self.trajectory is not None and (
+            not isinstance(self.trajectory, list)
+            or not all(isinstance(item, dict) for item in self.trajectory)
         ):
-            errors.append("tool_calls must be a list of objects")
-        elif any(
-            key in item and not isinstance(item[key], dict)
-            for item in self.tool_calls
-            for key in ("arguments", "args")
-        ):
-            errors.append("tool call arguments must be objects")
-        if not isinstance(self.files_changed, list) or not all(
-            isinstance(item, str) for item in self.files_changed
-        ):
-            errors.append("files_changed must be a list of strings")
-        elif any("\x00" in item for item in self.files_changed):
-            errors.append("files_changed paths must not contain NUL")
-        if not isinstance(self.trajectory, list) or not all(
-            isinstance(item, dict) for item in self.trajectory
-        ):
-            errors.append("trajectory must be a list of objects")
+            errors.append("trajectory must be a list of objects or null")
         if not isinstance(self.metadata, dict):
             errors.append("metadata must be an object")
         for name in ("input_tokens", "output_tokens", "cached_tokens"):
             value = getattr(self, name)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                errors.append(f"{name} must be a non-negative integer")
-        for name in ("cost_usd", "latency_seconds"):
-            value = getattr(self, name)
-            if not _is_finite_number(value) or value < 0:
-                errors.append(f"{name} must be a finite non-negative number")
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                errors.append(f"{name} must be a non-negative integer or null")
+        if self.cost_usd is not None and (
+            not _is_finite_number(self.cost_usd) or self.cost_usd < 0
+        ):
+            errors.append("cost_usd must be a finite non-negative number or null")
+        if not _is_finite_number(self.latency_seconds) or self.latency_seconds < 0:
+            errors.append("latency_seconds must be a finite non-negative number")
         if (
             isinstance(self.cached_tokens, int)
+            and not isinstance(self.cached_tokens, bool)
             and isinstance(self.input_tokens, int)
+            and not isinstance(self.input_tokens, bool)
             and self.cached_tokens > self.input_tokens
         ):
             errors.append("cached_tokens cannot exceed input_tokens")
         if self.exit_status not in {"completed", "failed", "cancelled", "timeout"}:
             errors.append("exit_status is invalid")
-        if self.exit_status == "completed" and not self.run_id:
-            errors.append("completed record requires run_id")
         if isinstance(self.metadata, dict):
             for name in ("retries", "sub_agents"):
-                if name not in self.metadata:
+                if name not in self.metadata or self.metadata[name] is None:
                     continue
                 value = self.metadata[name]
                 if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                    errors.append(f"metadata.{name} must be a non-negative integer")
+                    errors.append(f"metadata.{name} must be a non-negative integer or null")
         return errors
 
     def to_dict(self) -> dict[str, Any]:
