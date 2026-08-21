@@ -128,7 +128,14 @@ def evaluate_run(
     authority_verified: bool = False,
     checker_profile: CheckerProfile | None = None,
 ) -> EvaluatedRun:
-    integrity_errors = record.integrity_errors()
+    canonicalization_errors = (
+        list(record.canonicalization_errors)
+        if isinstance(record.canonicalization_errors, tuple)
+        else []
+    )
+    integrity_errors = list(
+        dict.fromkeys([*record.integrity_errors(), *canonicalization_errors])
+    )
     deterministic_checks: list[CheckResult] = [
         CheckResult(
             passed=record.exit_status == "completed",
@@ -587,7 +594,10 @@ class EvalRunner:
             **self._expected_identity,
         }
         for field_name, expected_value in expected.items():
-            if getattr(record, field_name) != expected_value:
+            if getattr(record, field_name) != expected_value and not (
+                self._source_identity_is_observed
+                and field_name in {"model", "provider", "harness"}
+            ):
                 errors.append(
                     f"{field_name} mismatch: {getattr(record, field_name)!r} != {expected_value!r}"
                 )
@@ -636,8 +646,9 @@ class EvalRunner:
         if record.isolation_level != self._isolation_level:
             errors.append("isolation_level mismatch")
         record.isolation_level = self._isolation_level
+        record.canonicalization_errors = tuple(errors)
         if errors:
-            record.metadata["integrity_errors"] = errors
+            record.metadata["integrity_errors"] = list(errors)
         return record
 
     def run(

@@ -202,6 +202,7 @@ class RunRecord:
     workspace_root: str | None = None
     isolation_level: str = "none"
     metadata: dict[str, Any] = field(default_factory=dict)
+    canonicalization_errors: tuple[str, ...] = ()
 
     def integrity_errors(self) -> list[str]:
         """Return schema and accounting invariant violations without changing evidence."""
@@ -263,6 +264,10 @@ class RunRecord:
             errors.append("trajectory must be a list of objects or null")
         if not isinstance(self.metadata, dict):
             errors.append("metadata must be an object")
+        if not isinstance(self.canonicalization_errors, tuple) or not all(
+            isinstance(item, str) for item in self.canonicalization_errors
+        ):
+            errors.append("canonicalization_errors must be a tuple of strings")
         for name in ("input_tokens", "output_tokens", "cached_tokens"):
             value = getattr(self, name)
             if value is not None and (

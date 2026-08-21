@@ -551,9 +551,8 @@ Specific behavior:
 
 On the implementation snapshot:
 
-- focused AE-1B Evidence Truth regressions after review repair: `30 passed`;
-- focused/adjacent compatibility suite after review repair: `106 passed, 1 skipped`;
-- full repository suite after review repair: `106 passed, 1 skipped`;
+- focused AE-1B Evidence Truth regressions after final-review repair: `38 passed`;
+- full repository suite after final-review repair: `114 passed, 1 skipped`;
 - repository-standard Ruff scope: PASS;
 - `git diff --check`: PASS.
 
@@ -575,8 +574,8 @@ AAO master@5a1ab3c
 Local artifacts:
 
 - `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/record.json`;
-- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports-review-fix/report.json`;
-- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports-review-fix/report.md`.
+- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports-final-reviewfix/report.json`;
+- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports-final-reviewfix/report.md`.
 
 Mechanical truth assertions passed. The real record retained `cached_tokens=null`,
 `tool_calls=null`, `output=null`, and observed `files_changed=[]`. AE retained those distinctions,
@@ -590,7 +589,9 @@ not a vertical-slice failure.
 ### Review, CI and merge state at this checkpoint
 
 - initial independent AE-1B review: COMPLETE / BLOCK (`P0=2`, `P1=2`);
-- bounded review repair: IMPLEMENTED; same-reviewer re-verification PENDING;
+- bounded initial-review repair: IMPLEMENTED;
+- replacement final review: COMPLETE / BLOCK (`P0=1`, `P1=0`);
+- bounded final-review repair: IMPLEMENTED; replacement-reviewer re-verification PENDING;
 - exact-head GitHub Actions for the final PR head: PENDING;
 - PR #2 draft state: expected OPEN / DRAFT / UNMERGED;
 - merge: NOT PERFORMED.

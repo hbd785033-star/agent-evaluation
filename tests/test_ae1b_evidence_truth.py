@@ -536,3 +536,122 @@ def test_adapter_exception_marks_every_unobserved_field_none():
         "run_id",
     ):
         assert stored[name] is None
+
+
+def _complete_record(task_id: str, trial: int, run_id: str | None) -> RunRecord:
+    return RunRecord(
+        task_id,
+        "m",
+        "p",
+        "h",
+        trial,
+        output="",
+        tool_calls=[],
+        files_changed=[],
+        trajectory=[],
+        input_tokens=0,
+        output_tokens=0,
+        cached_tokens=0,
+        cost_usd=0.0,
+        cost_semantics="reported",
+        latency_seconds=0.0,
+        run_id=run_id,
+    )
+
+
+def test_duplicate_trustworthy_run_id_is_a_verdict_gate():
+    class DuplicateAdapter:
+        model = "m"
+        provider = "p"
+        harness = "h"
+        isolation_level = "none"
+        workspace_root = None
+
+        def run(self, task, trial):
+            return _complete_record(task.id, trial, "same-real-run")
+
+        def cleanup(self, _record):
+            return None
+
+    report = EvalRunner(DuplicateAdapter()).run([TaskCase(id="t", prompt="", trials=2)])
+
+    assert report["runs"][0]["passed"] is True
+    assert report["runs"][1]["passed"] is False
+    assert "duplicate run_id: same-real-run" in report["runs"][1]["record"][
+        "canonicalization_errors"
+    ]
+
+
+def test_multiple_missing_run_ids_remain_allowed():
+    class MissingIdAdapter:
+        model = "m"
+        provider = "p"
+        harness = "h"
+        isolation_level = "none"
+        workspace_root = None
+
+        def run(self, task, trial):
+            return _complete_record(task.id, trial, None)
+
+        def cleanup(self, _record):
+            return None
+
+    report = EvalRunner(MissingIdAdapter()).run([TaskCase(id="t", prompt="", trials=2)])
+
+    assert [row["record"]["run_id"] for row in report["runs"]] == [None, None]
+    assert all("duplicate run_id" not in json.dumps(row) for row in report["runs"])
+
+
+def test_empty_non_null_run_id_cannot_pass():
+    record = _complete_record("t", 1, "")
+    report = EvalRunner(RecordedAdapter([record])).run([TaskCase(id="t", prompt="")])
+
+    assert report["runs"][0]["passed"] is False
+    assert "run_id must be a non-empty string or null" in report["runs"][0]["record"][
+        "canonicalization_errors"
+    ]
+
+
+def test_workspace_and_isolation_mismatch_cannot_pass(tmp_path):
+    trusted = tmp_path / "trusted"
+    outside = tmp_path / "outside"
+    trusted.mkdir()
+    outside.mkdir()
+    record = _complete_record("t", 1, "real-run")
+    record.workspace_root = str(outside)
+    record.isolation_level = "workspace"
+    report = EvalRunner(
+        RecordedAdapter([record], workspace_root=trusted, isolation_level="os")
+    ).run([TaskCase(id="t", prompt="", allowed_files=["src/**"])])
+    stored = report["runs"][0]["record"]
+
+    assert report["runs"][0]["passed"] is False
+    assert "workspace_root escapes control-plane trust root" in stored[
+        "canonicalization_errors"
+    ]
+    assert "isolation_level mismatch" in stored["canonicalization_errors"]
+    assert stored["workspace_root"] is None
+    assert stored["isolation_level"] == "os"
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "timeout"])
+def test_canonicalization_gate_does_not_rewrite_terminal_status(status):
+    record = _complete_record("wrong-task", 9, "real-run")
+    record.exit_status = status
+    class MismatchAdapter:
+        model = "m"
+        provider = "p"
+        harness = "h"
+        isolation_level = "none"
+        workspace_root = None
+
+        def run(self, _task, _trial):
+            return record
+
+        def cleanup(self, _record):
+            return None
+
+    report = EvalRunner(MismatchAdapter()).run([TaskCase(id="expected", prompt="")])
+
+    assert report["runs"][0]["record"]["exit_status"] == status
+    assert report["runs"][0]["passed"] is False
