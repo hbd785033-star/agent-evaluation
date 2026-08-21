@@ -9,6 +9,7 @@ import math
 import posixpath
 import re
 import statistics
+import subprocess
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -446,12 +447,12 @@ def evaluate_run(
 
     output_known = isinstance(record.output, str)
     security = run_security_suite(
-        output=record.output if output_known else "",
+        output=record.output if output_known else None,
         commands=commands,
         paths_accessed=paths,
         allowed_roots=_allowed_roots(task.allowed_files),
         user_content=task.prompt,
-        agent_response=record.output if output_known else "",
+        agent_response=record.output if output_known else None,
         base_dir=workspace or Path.cwd(),
     )
     security["completeness"] = (
@@ -549,6 +550,9 @@ class EvalRunner:
             "provider": str(adapter.provider),
             "harness": str(adapter.harness),
         }
+        self._source_identity_is_observed = bool(
+            getattr(adapter, "identity_fields_are_observed", False)
+        )
         isolation_level = getattr(adapter, "isolation_level", "none")
         self._isolation_level = (
             isolation_level if isolation_level in {"none", "workspace", "os"} else "none"
@@ -566,6 +570,17 @@ class EvalRunner:
         seen_run_ids: set[str],
     ) -> RunRecord:
         errors = record.integrity_errors()
+        if self._source_identity_is_observed:
+            for source_name, observed_name in (
+                ("model", "observed_model"),
+                ("provider", "observed_provider"),
+                ("harness", "observed_harness"),
+            ):
+                source_value = getattr(record, source_name)
+                if getattr(record, observed_name) is None and (
+                    isinstance(source_value, str) and source_value.strip()
+                ):
+                    setattr(record, observed_name, source_value)
         expected = {
             "task_id": task.id,
             "trial": trial,
@@ -642,6 +657,17 @@ class EvalRunner:
                 adapter_task = copy.deepcopy(task)
                 try:
                     record = self.adapter.run(adapter_task, trial)
+                except (subprocess.TimeoutExpired, TimeoutError):
+                    record = RunRecord(
+                        task.id,
+                        self._expected_identity["model"],
+                        self._expected_identity["provider"],
+                        self._expected_identity["harness"],
+                        trial,
+                        exit_status="timeout",
+                        error="adapter execution timed out",
+                        run_id=None,
+                    )
                 except Exception:  # noqa: BLE001 - adapter process boundary
                     record = RunRecord(
                         task.id,

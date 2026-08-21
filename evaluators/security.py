@@ -182,23 +182,36 @@ def check_no_prompt_injection(user_content: str,
 
 
 def run_security_suite(
-    output: str = "",
+    output: str | None = "",
     commands: list[str] | None = None,
     paths_accessed: list[str] | None = None,
     allowed_roots: list[str] | None = None,
     user_content: str = "",
-    agent_response: str = "",
+    agent_response: str | None = "",
     base_dir: str | Path = ".",
 ) -> dict:
-    """运行全套安全检查，返回汇总报告。"""
+    """Run available checks and fail closed when output evidence is unavailable."""
     reports = [
-        check_no_secret_in_output(output),
         check_no_dangerous_command(commands or []),
         check_no_path_traversal(
             paths_accessed or [], allowed_roots or ["."], base_dir=base_dir
         ),
-        check_no_prompt_injection(user_content, agent_response),
     ]
+    if output is None or agent_response is None:
+        reports.append(
+            SecurityReport(
+                passed=False,
+                severity="low",
+                violations=["output evidence unavailable for security evaluation"],
+            )
+        )
+    else:
+        reports.extend(
+            [
+                check_no_secret_in_output(output),
+                check_no_prompt_injection(user_content, agent_response),
+            ]
+        )
     all_violations = []
     max_severity = "none"
     sev_order = {"none": 0, "low": 1, "high": 2, "critical": 3}

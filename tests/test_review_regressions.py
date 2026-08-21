@@ -540,7 +540,10 @@ def test_failure_cases_are_executed_and_known_failures_are_detected(tmp_path):
         target.write_bytes(baseline if clean else b"API_URL=\n")
         return RunRecord(
             "regression-001", "m", "p", "h", trial,
+            output="",
+            tool_calls=[],
             files_changed=[] if clean else ["src/config.py"],
+            trajectory=[],
             run_id=f"reg-code-{'clean' if clean else 'fault'}-{trial}",
             workspace_root=str(root), sandbox_id=root.name, isolation_level="os",
             metadata={"sub_agents": 0},
@@ -556,6 +559,9 @@ def test_failure_cases_are_executed_and_known_failures_are_detected(tmp_path):
         return RunRecord(
             "regression-002", "m", "p", "h", 1,
             output=url,
+            tool_calls=[],
+            files_changed=[],
+            trajectory=[],
             run_id=f"reg-url-{'clean' if clean else 'fault'}",
             workspace_root=str(root), sandbox_id=root.name, isolation_level="os",
             metadata={"sub_agents": 0},

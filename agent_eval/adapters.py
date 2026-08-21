@@ -36,6 +36,8 @@ class CommandAgentAdapter:
     come from a control-plane-verified OS sandbox.
     """
 
+    identity_fields_are_observed = False
+
     def __init__(
         self,
         command: Sequence[str],
@@ -99,7 +101,8 @@ class CommandAgentAdapter:
         started: float,
         error: str,
         *,
-        output: str = "",
+        output: str | None = None,
+        exit_status: str = "failed",
     ) -> RunRecord:
         return RunRecord(
             task_id=task.id,
@@ -109,7 +112,7 @@ class CommandAgentAdapter:
             trial=trial,
             output=output,
             latency_seconds=time.perf_counter() - started,
-            exit_status="failed",
+            exit_status=exit_status,
             error=error,
             run_id=None,
             **self._authority(workspace),
@@ -147,7 +150,16 @@ class CommandAgentAdapter:
                 timeout=self.timeout_seconds,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            return self._failed_record(
+                task,
+                trial,
+                workspace,
+                started,
+                str(exc),
+                exit_status="timeout",
+            )
+        except OSError as exc:
             return self._failed_record(task, trial, workspace, started, str(exc))
 
         if completed.returncode != 0:
@@ -184,14 +196,19 @@ class CommandAgentAdapter:
                 provider=self.provider,
                 harness=self.harness,
                 trial=trial,
-                output=raw.get("output", ""),
-                tool_calls=raw.get("tool_calls", []),
-                files_changed=raw.get("files_changed", []),
-                trajectory=raw.get("trajectory", []),
-                input_tokens=raw.get("input_tokens", usage.get("input_tokens", 0)),
-                output_tokens=raw.get("output_tokens", usage.get("output_tokens", 0)),
-                cached_tokens=raw.get("cached_tokens", usage.get("cached_tokens", 0)),
-                cost_usd=raw.get("cost_usd", usage.get("cost_usd", 0.0)),
+                output=raw.get("output"),
+                tool_calls=raw.get("tool_calls"),
+                files_changed=raw.get("files_changed"),
+                trajectory=raw.get("trajectory"),
+                input_tokens=raw.get("input_tokens", usage.get("input_tokens")),
+                output_tokens=raw.get("output_tokens", usage.get("output_tokens")),
+                cached_tokens=raw.get("cached_tokens", usage.get("cached_tokens")),
+                cost_usd=raw.get("cost_usd", usage.get("cost_usd")),
+                cost_semantics=(
+                    "reported"
+                    if raw.get("cost_usd", usage.get("cost_usd")) is not None
+                    else None
+                ),
                 latency_seconds=time.perf_counter() - started,
                 exit_status=raw.get("exit_status", "completed"),
                 error=raw.get("error"),
@@ -222,6 +239,8 @@ class CommandAgentAdapter:
 
 class RecordedAdapter:
     """Replay exported records with optional control-plane trust context."""
+
+    identity_fields_are_observed = True
 
     def __init__(
         self,

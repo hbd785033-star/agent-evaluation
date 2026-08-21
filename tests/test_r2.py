@@ -109,6 +109,10 @@ def test_checker_registry_runs_builtins_profile_and_registered_custom(tmp_path):
         "p",
         "h",
         1,
+        output="",
+        tool_calls=[],
+        files_changed=[],
+        trajectory=[],
         run_id="checker-run",
         workspace_root=str(tmp_path),
     )
@@ -251,7 +255,7 @@ def test_calibrated_judge_records_versioned_identity():
             "success_criteria": {"llm_judge": ["minimal change"]},
         }
     )
-    record = RunRecord("judge-task", "m", "p", "h", 1, run_id="judge-run")
+    record = RunRecord("judge-task", "m", "p", "h", 1, output="quality", run_id="judge-run")
 
     report = EvalRunner(RecordedAdapter([record]), judge=judge).run([task])
 
@@ -287,7 +291,7 @@ def test_uncalibrated_judge_fails_closed():
             "success_criteria": {"llm_judge": ["quality"]},
         }
     )
-    record = RunRecord("judge-task", "m", "p", "h", 1, run_id="judge-run")
+    record = RunRecord("judge-task", "m", "p", "h", 1, output="quality", run_id="judge-run")
 
     report = EvalRunner(RecordedAdapter([record]), judge=judge).run([task])
 

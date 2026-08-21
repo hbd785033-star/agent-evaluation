@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from agent_eval.adapters import RecordedAdapter
+from agent_eval.adapters import CommandAgentAdapter, RecordedAdapter
 from agent_eval.execution_record import ExecutionRecordAdapter, load_execution_records
 from agent_eval.models import EvaluatedRun, RunRecord, TaskCase
 from agent_eval.runner import EvalRunner, build_report, evaluate_run
@@ -340,3 +342,197 @@ def test_recorded_adapter_rejects_duplicate_task_trial():
     ]
     with pytest.raises(ValueError, match="duplicate RecordedAdapter task_id/trial"):
         RecordedAdapter(records)
+
+
+def test_omitted_legacy_replay_evidence_defaults_to_none():
+    record = RunRecord.from_dict(
+        {"task_id": "t", "model": "m", "provider": "p", "harness": "h", "trial": 1}
+    )
+
+    assert record.output is None
+    assert record.tool_calls is None
+    assert record.files_changed is None
+    assert record.trajectory is None
+    assert record.input_tokens is None
+    assert record.output_tokens is None
+    assert record.cached_tokens is None
+    assert record.cost_usd is None
+    assert record.latency_seconds is None
+    assert record.cost_semantics is None
+
+
+def test_omitted_replay_evidence_cannot_pass_file_or_action_constraints(tmp_path):
+    record = RunRecord.from_dict(
+        {
+            "task_id": "t",
+            "model": "observed-m",
+            "provider": "observed-p",
+            "harness": "observed-h",
+            "trial": 1,
+            "workspace_root": str(tmp_path),
+            "isolation_level": "os",
+        }
+    )
+    report = EvalRunner(
+        RecordedAdapter(
+            [record],
+            model="experiment-m",
+            provider="experiment-p",
+            harness="experiment-h",
+            workspace_root=tmp_path,
+            isolation_level="os",
+        )
+    ).run(
+        [
+            TaskCase(
+                id="t",
+                prompt="",
+                allowed_files=["src/**"],
+                forbidden_actions=["git push"],
+            )
+        ]
+    )
+    failures = {
+        item["check"] for item in report["runs"][0]["layers"]["deterministic"]["failures"]
+    }
+
+    assert report["runs"][0]["passed"] is False
+    assert "files_changed_evidence_available" in failures
+    assert "action_evidence_available" in failures
+    assert report["aggregates"][0]["cost_available_samples"] == 0
+
+
+def test_recorded_adapter_preserves_legacy_observed_identity_before_override():
+    source = RunRecord("t", "observed-m", "observed-p", "observed-h", 1)
+    report = EvalRunner(
+        RecordedAdapter(
+            [source],
+            model="experiment-m",
+            provider="experiment-p",
+            harness="experiment-h",
+        )
+    ).run([TaskCase(id="t", prompt="")])
+    stored = report["runs"][0]["record"]
+
+    assert stored["model"] == "experiment-m"
+    assert stored["provider"] == "experiment-p"
+    assert stored["harness"] == "experiment-h"
+    assert stored["observed_model"] == "observed-m"
+    assert stored["observed_provider"] == "observed-p"
+    assert stored["observed_harness"] == "observed-h"
+
+
+def test_command_adapter_omitted_observations_remain_none(tmp_path):
+    harness = tmp_path / "unknown.py"
+    harness.write_text("import json; print(json.dumps({}))", encoding="utf-8")
+    adapter = CommandAgentAdapter(
+        [sys.executable, str(harness)],
+        model="m",
+        provider="p",
+        workspace_root=tmp_path / "workspaces",
+    )
+
+    record = adapter.run(TaskCase(id="t", prompt=""), 1)
+
+    assert record.output is None
+    assert record.tool_calls is None
+    assert record.files_changed is None
+    assert record.trajectory is None
+    assert record.input_tokens is None
+    assert record.output_tokens is None
+    assert record.cached_tokens is None
+    assert record.cost_usd is None
+    assert record.run_id is None
+    adapter.cleanup(record)
+
+
+def test_command_adapter_timeout_is_preserved(monkeypatch, tmp_path):
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["agent"], 1)
+
+    monkeypatch.setattr("agent_eval.adapters.subprocess.run", timeout)
+    adapter = CommandAgentAdapter(
+        ["agent"], model="m", provider="p", workspace_root=tmp_path / "workspaces"
+    )
+    record = adapter.run(TaskCase(id="t", prompt=""), 1)
+
+    assert record.exit_status == "timeout"
+    assert record.run_id is None
+    assert record.output is None
+    adapter.cleanup(record)
+
+
+def test_generic_adapter_timeout_is_preserved():
+    class TimeoutAdapter:
+        model = "m"
+        provider = "p"
+        harness = "h"
+        isolation_level = "none"
+        workspace_root = None
+
+        def run(self, _task, _trial):
+            raise TimeoutError("timed out")
+
+        def cleanup(self, _record):
+            return None
+
+    report = EvalRunner(TimeoutAdapter()).run([TaskCase(id="t", prompt="")])
+    stored = report["runs"][0]["record"]
+
+    assert stored["exit_status"] == "timeout"
+    assert stored["run_id"] is None
+    assert stored["output"] is None
+
+
+def test_missing_output_security_is_unavailable_and_blocks_overall_pass():
+    record = RunRecord(
+        "t", "m", "p", "h", 1, output=None, tool_calls=[], files_changed=[], trajectory=[]
+    )
+    evaluated = evaluate_run(TaskCase(id="t", prompt=""), record)
+
+    assert evaluated.layers["security"]["passed"] is False
+    assert evaluated.layers["security"]["output_evidence"] == "unavailable"
+    assert "output evidence unavailable" in evaluated.layers["security"]["violations"][0]
+    assert evaluated.passed is False
+
+
+def test_observed_empty_output_remains_evaluable_empty_output():
+    record = RunRecord(
+        "t", "m", "p", "h", 1, output="", tool_calls=[], files_changed=[], trajectory=[]
+    )
+    evaluated = evaluate_run(TaskCase(id="t", prompt=""), record)
+
+    assert evaluated.record.output == ""
+    assert evaluated.layers["security"]["output_evidence"] == "available"
+    assert evaluated.layers["security"]["passed"] is True
+
+
+def test_adapter_exception_marks_every_unobserved_field_none():
+    class ExplodingAdapter:
+        model = "m"
+        provider = "p"
+        harness = "h"
+        isolation_level = "none"
+        workspace_root = None
+
+        def run(self, _task, _trial):
+            raise OSError("boom")
+
+        def cleanup(self, _record):
+            return None
+
+    report = EvalRunner(ExplodingAdapter()).run([TaskCase(id="t", prompt="")])
+    stored = report["runs"][0]["record"]
+    for name in (
+        "output",
+        "tool_calls",
+        "files_changed",
+        "trajectory",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "cost_usd",
+        "latency_seconds",
+        "run_id",
+    ):
+        assert stored[name] is None

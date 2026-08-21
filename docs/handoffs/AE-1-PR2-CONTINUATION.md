@@ -551,8 +551,9 @@ Specific behavior:
 
 On the implementation snapshot:
 
-- focused AE-1B/ExecutionRecord/runner regressions: `77 passed, 1 skipped`;
-- full repository suite: `97 passed, 1 skipped`;
+- focused AE-1B Evidence Truth regressions after review repair: `30 passed`;
+- focused/adjacent compatibility suite after review repair: `106 passed, 1 skipped`;
+- full repository suite after review repair: `106 passed, 1 skipped`;
 - repository-standard Ruff scope: PASS;
 - `git diff --check`: PASS.
 
@@ -574,19 +575,22 @@ AAO master@5a1ab3c
 Local artifacts:
 
 - `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/record.json`;
-- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports/report.json`;
-- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports/report.md`.
+- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports-review-fix/report.json`;
+- `C:/Users/EDY/AppData/Local/Temp/ae1b-vertical-slice-5a1ab3c/reports-review-fix/report.md`.
 
 Mechanical truth assertions passed. The real record retained `cached_tokens=null`,
 `tool_calls=null`, `output=null`, and observed `files_changed=[]`. AE retained those distinctions,
 kept the real runtime run ID, separated mock/fixture observations from experiment labels, did not
 promote workspace claims, reported trajectory unavailable, labelled cost
-`producer_estimated`, and emitted both normal report artifacts. The evaluated run happened to
-PASS, but that PASS is not the Evidence Truth closure criterion.
+`producer_estimated`, and emitted both normal report artifacts. After the independent-review
+repair, the evaluated run truthfully FAILS because output evidence is unavailable; no empty output
+is invented for security evaluation. That EvaluatedRun FAIL is an expected Evidence Truth result,
+not a vertical-slice failure.
 
 ### Review, CI and merge state at this checkpoint
 
-- independent AE-1B review: PENDING;
+- initial independent AE-1B review: COMPLETE / BLOCK (`P0=2`, `P1=2`);
+- bounded review repair: IMPLEMENTED; same-reviewer re-verification PENDING;
 - exact-head GitHub Actions for the final PR head: PENDING;
 - PR #2 draft state: expected OPEN / DRAFT / UNMERGED;
 - merge: NOT PERFORMED.

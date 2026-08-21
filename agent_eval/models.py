@@ -178,15 +178,15 @@ class RunRecord:
     provider: str
     harness: str
     trial: int
-    output: str | None = ""
-    tool_calls: list[dict[str, Any]] | None = field(default_factory=list)
-    files_changed: list[str] | None = field(default_factory=list)
-    trajectory: list[dict[str, Any]] | None = field(default_factory=list)
-    input_tokens: int | None = 0
-    output_tokens: int | None = 0
-    cached_tokens: int | None = 0
-    cost_usd: float | None = 0.0
-    latency_seconds: float = 0.0
+    output: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    files_changed: list[str] | None = None
+    trajectory: list[dict[str, Any]] | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
+    cost_usd: float | None = None
+    latency_seconds: float | None = None
     exit_status: str = "completed"
     error: str | None = None
     run_id: str | None = None
@@ -196,7 +196,7 @@ class RunRecord:
     planned_runtime: str | None = None
     selected_runtime: str | None = None
     observed_runtime: str | None = None
-    cost_semantics: str | None = "reported"
+    cost_semantics: str | None = None
     dataset_version: str = ""
     sandbox_id: str = ""
     workspace_root: str | None = None
@@ -273,8 +273,10 @@ class RunRecord:
             not _is_finite_number(self.cost_usd) or self.cost_usd < 0
         ):
             errors.append("cost_usd must be a finite non-negative number or null")
-        if not _is_finite_number(self.latency_seconds) or self.latency_seconds < 0:
-            errors.append("latency_seconds must be a finite non-negative number")
+        if self.latency_seconds is not None and (
+            not _is_finite_number(self.latency_seconds) or self.latency_seconds < 0
+        ):
+            errors.append("latency_seconds must be a finite non-negative number or null")
         if (
             isinstance(self.cached_tokens, int)
             and not isinstance(self.cached_tokens, bool)

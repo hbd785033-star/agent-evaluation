@@ -383,6 +383,8 @@ def load_execution_records(path: str | Path) -> list[ExecutionRecord]:
 class ExecutionRecordAdapter:
     """Convert external records while keeping experiment and execution identity separate."""
 
+    identity_fields_are_observed = False
+
     def __init__(
         self,
         records: list[ExecutionRecord],
