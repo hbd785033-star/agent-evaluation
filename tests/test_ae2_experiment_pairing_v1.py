@@ -242,6 +242,64 @@ def test_required_unknown_evidence_is_incomplete_not_matched_or_mismatched():
     assert any("workspace" in reason and "unavailable" in reason for reason in result.reasons)
 
 
+@pytest.mark.parametrize(
+    "field",
+    ("tool_evidence_completeness", "file_evidence_completeness"),
+)
+def test_complete_profile_identity_cannot_mask_unknown_required_evidence(field):
+    raw_b = _record(arm="B", observed_runtime="runtime-b")
+    namespace = raw_b["metadata"]["aao_experiment_v1"]
+    namespace["observed_profile"][field] = "unknown"
+
+    assert namespace["profile_identity"]["completeness"] == "complete"
+
+    result = compare_experiment_pair(
+        [
+            parse_aao_experiment_record(_record(arm="A")),
+            parse_aao_experiment_record(raw_b),
+        ]
+    )
+
+    assert result.status is ComparabilityStatus.INCOMPLETE
+    assert any(
+        f"observed_profile.{field}" in reason and "unavailable" in reason
+        for reason in result.reasons
+    )
+
+
+def test_unknown_required_evidence_beats_known_control_mismatch():
+    raw_b = _record(arm="B", task_hash="task-b", observed_runtime="runtime-b")
+    raw_b["metadata"]["aao_experiment_v1"]["observed_profile"][
+        "tool_evidence_completeness"
+    ] = "unknown"
+
+    result = compare_experiment_pair(
+        [
+            parse_aao_experiment_record(_record(arm="A")),
+            parse_aao_experiment_record(raw_b),
+        ]
+    )
+
+    assert result.status is ComparabilityStatus.INCOMPLETE
+    assert "observed_profile.tool_evidence_completeness" in " ".join(result.reasons)
+    assert "task_contract_sha256" in " ".join(result.reasons)
+
+
+def test_invalid_duplicate_beats_unknown_required_evidence():
+    raw = _record(arm="A")
+    raw["metadata"]["aao_experiment_v1"]["observed_profile"][
+        "tool_evidence_completeness"
+    ] = "unknown"
+
+    result = compare_experiment_pair(
+        [parse_aao_experiment_record(raw), parse_aao_experiment_record(raw)]
+    )
+
+    assert result.status is ComparabilityStatus.INVALID
+    assert any("duplicate" in reason for reason in result.reasons)
+    assert "observed_profile.tool_evidence_completeness" in " ".join(result.reasons)
+
+
 def test_duplicate_same_v1_arm_is_invalid():
     arm_a = parse_aao_experiment_record(_record(arm="A"))
     duplicate = parse_aao_experiment_record(_record(arm="A"))

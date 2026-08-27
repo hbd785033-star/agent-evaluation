@@ -28,6 +28,28 @@ _REQUIRED_SECTIONS = (
     "budget",
     "execution_lifecycle",
 )
+_REQUIRED_CONFIGURED_PROFILE_EVIDENCE = (
+    "runtime",
+    "harness",
+    "execution_mode",
+    "tools_config_sha256",
+    "policy_config_sha256",
+    "environment_config_sha256",
+    "approval_policy_identity",
+    "budget_id",
+)
+_REQUIRED_OBSERVED_PROFILE_EVIDENCE = (
+    "runtime",
+    "effective_workspace_revision",
+    "observed_isolation_level",
+    "tool_evidence_completeness",
+    "file_evidence_completeness",
+)
+_REQUIRED_WORKSPACE_EVIDENCE = (
+    "starting_revision",
+    "isolation_mode",
+    "fixture_revision",
+)
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -282,6 +304,53 @@ class PairComparisonV1:
     ae_judge: None = None
 
 
+def _comparability_required_evidence(
+    record: ExperimentRecordV1,
+) -> tuple[tuple[str, Any], ...]:
+    configured_extra: tuple[str, ...] = ()
+    observed_extra: tuple[str, ...] = ()
+    comparison_kind = record.experiment["comparison_kind"]
+    if comparison_kind in {"harness_comparison", "budget_policy_comparison"}:
+        configured_extra = ("model", "provider", "reasoning_config_sha256")
+        observed_extra = ("model", "provider")
+    elif comparison_kind in {"model_comparison", "provider_comparison"}:
+        configured_extra = ("model", "provider")
+        observed_extra = ("model", "provider")
+
+    evidence: list[tuple[str, Any]] = [
+        (f"configured_profile.{name}", record.configured_profile.get(name))
+        for name in _REQUIRED_CONFIGURED_PROFILE_EVIDENCE + configured_extra
+    ]
+    evidence.extend(
+        (f"observed_profile.{name}", record.observed_profile.get(name))
+        for name in _REQUIRED_OBSERVED_PROFILE_EVIDENCE + observed_extra
+    )
+    workspace = record.configured_profile["workspace_contract"]
+    evidence.extend(
+        (f"configured_profile.workspace_contract.{name}", workspace.get(name))
+        for name in _REQUIRED_WORKSPACE_EVIDENCE
+    )
+    evidence.extend(
+        (
+            (
+                "experiment.experiment_definition_sha256",
+                record.experiment["experiment_definition_sha256"],
+            ),
+            ("task.task_contract_sha256", record.task["task_contract_sha256"]),
+            ("task.prompt_sha256", record.task["prompt_sha256"]),
+            ("task.success_criteria_sha256", record.task["success_criteria_sha256"]),
+            ("budget.configured_budget", record.budget["configured_budget"]),
+        )
+    )
+    return tuple(evidence)
+
+
+def _required_evidence_unavailable(label: str, value: Any) -> bool:
+    if label.endswith("_evidence_completeness"):
+        return value != "complete"
+    return _evidence_unavailable(value)
+
+
 def _same(records: tuple[ExperimentRecordV1, ...], label: str, getter) -> str | None:
     values = [getter(record) for record in records]
     encoded = [json.dumps(value, sort_keys=True, separators=(",", ":")) for value in values]
@@ -326,6 +395,16 @@ def compare_experiment_pair(
     if any(row.profile_identity["completeness"] != "complete" for row in rows):
         incomplete_reasons.append("effective profile is incomplete")
 
+    for row in rows:
+        for label, value in _comparability_required_evidence(row):
+            if _required_evidence_unavailable(label, value):
+                reason = (
+                    f"required evidence unavailable: {label} "
+                    f"(arm {row.experiment['arm_id']})"
+                )
+                if reason not in incomplete_reasons:
+                    incomplete_reasons.append(reason)
+
     for label, getter in (
         ("experiment definition", lambda row: row.experiment["experiment_definition_sha256"]),
         ("task_contract_sha256", lambda row: row.task["task_contract_sha256"]),
@@ -342,7 +421,6 @@ def compare_experiment_pair(
     ):
         values = tuple(getter(row) for row in rows)
         if any(_evidence_unavailable(value) for value in values):
-            incomplete_reasons.append(f"{label} evidence unavailable")
             continue
         mismatch = _same(rows, label, getter)
         if mismatch:
