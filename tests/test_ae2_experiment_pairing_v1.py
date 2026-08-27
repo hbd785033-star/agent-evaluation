@@ -1,4 +1,4 @@
-"""AE-2 V1 experiment identity, ingestion, and pair-status RED tests."""
+"""AE-2 V1 experiment identity, ingestion, and pair-status tests."""
 
 from __future__ import annotations
 
@@ -177,6 +177,71 @@ def test_same_trial_ab_arms_import_and_are_comparable():
     assert result.ae_judge is None
 
 
+def test_public_comparability_status_set_has_exactly_four_states():
+    assert {status.name for status in ComparabilityStatus} == {
+        "COMPARABLE",
+        "INCOMPARABLE",
+        "INCOMPLETE",
+        "INVALID",
+    }
+    assert {status.value for status in ComparabilityStatus} == {
+        "comparable",
+        "incomparable",
+        "incomplete",
+        "invalid",
+    }
+    assert not hasattr(ComparabilityStatus, "MISSING_COUNTERPART")
+
+
+def test_missing_counterpart_is_incomplete_without_legacy_status():
+    arm_a = parse_aao_experiment_record(_record(arm="A"))
+
+    result = compare_experiment_pair([arm_a])
+
+    assert result.status is ComparabilityStatus.INCOMPLETE
+    assert result.status.value != "missing_counterpart"
+    assert result.reasons == ("exactly two arms are required",)
+
+
+def test_material_profile_evidence_missing_is_incomplete():
+    result = compare_experiment_pair(
+        [
+            parse_aao_experiment_record(_record(arm="A")),
+            parse_aao_experiment_record(
+                _record(
+                    arm="B",
+                    completeness="incomplete",
+                    effective_profile_id=None,
+                    observed_runtime=None,
+                    runtime_run_id=None,
+                    submission_attempted=False,
+                )
+            ),
+        ]
+    )
+
+    assert result.status is ComparabilityStatus.INCOMPLETE
+    assert "effective profile is incomplete" in result.reasons
+
+
+def test_required_unknown_evidence_is_incomplete_not_matched_or_mismatched():
+    raw_a = _record(arm="A")
+    raw_b = _record(arm="B", observed_runtime="runtime-b")
+    raw_a["metadata"]["aao_experiment_v1"]["configured_profile"]["workspace_contract"][
+        "starting_revision"
+    ] = None
+    raw_b["metadata"]["aao_experiment_v1"]["configured_profile"]["workspace_contract"][
+        "starting_revision"
+    ] = None
+
+    result = compare_experiment_pair(
+        [parse_aao_experiment_record(raw_a), parse_aao_experiment_record(raw_b)]
+    )
+
+    assert result.status is ComparabilityStatus.INCOMPLETE
+    assert any("workspace" in reason and "unavailable" in reason for reason in result.reasons)
+
+
 def test_duplicate_same_v1_arm_is_invalid():
     arm_a = parse_aao_experiment_record(_record(arm="A"))
     duplicate = parse_aao_experiment_record(_record(arm="A"))
@@ -185,6 +250,50 @@ def test_duplicate_same_v1_arm_is_invalid():
 
     assert result.status is ComparabilityStatus.INVALID
     assert any("duplicate" in reason for reason in result.reasons)
+
+
+def test_pair_identity_mismatch_is_invalid():
+    raw_b = _record(arm="B", observed_runtime="runtime-b")
+    raw_b["metadata"]["aao_experiment_v1"]["experiment"]["pair_id"] = "pair-2"
+
+    result = compare_experiment_pair(
+        [
+            parse_aao_experiment_record(_record(arm="A")),
+            parse_aao_experiment_record(raw_b),
+        ]
+    )
+
+    assert result.status is ComparabilityStatus.INVALID
+    assert "identity mismatch" in " ".join(result.reasons)
+
+
+def test_invalid_duplicate_beats_incomplete_profile():
+    arm_a = parse_aao_experiment_record(
+        _record(
+            arm="A",
+            completeness="incomplete",
+            effective_profile_id=None,
+            observed_runtime=None,
+            runtime_run_id=None,
+            submission_attempted=False,
+        )
+    )
+    duplicate = parse_aao_experiment_record(
+        _record(
+            arm="A",
+            completeness="incomplete",
+            effective_profile_id=None,
+            observed_runtime=None,
+            runtime_run_id=None,
+            submission_attempted=False,
+        )
+    )
+
+    result = compare_experiment_pair([arm_a, duplicate])
+
+    assert result.status is ComparabilityStatus.INVALID
+    assert any("duplicate" in reason for reason in result.reasons)
+    assert "effective profile is incomplete" in result.reasons
 
 
 def test_task_hash_mismatch_is_incomparable():
@@ -196,6 +305,29 @@ def test_task_hash_mismatch_is_incomparable():
     )
 
     assert result.status is ComparabilityStatus.INCOMPARABLE
+    assert "task_contract_sha256" in " ".join(result.reasons)
+
+
+def test_incomplete_profile_beats_complete_control_mismatch():
+    result = compare_experiment_pair(
+        [
+            parse_aao_experiment_record(_record(arm="A")),
+            parse_aao_experiment_record(
+                _record(
+                    arm="B",
+                    task_hash="task-b",
+                    completeness="incomplete",
+                    effective_profile_id=None,
+                    observed_runtime=None,
+                    runtime_run_id=None,
+                    submission_attempted=False,
+                )
+            ),
+        ]
+    )
+
+    assert result.status is ComparabilityStatus.INCOMPLETE
+    assert "effective profile is incomplete" in result.reasons
     assert "task_contract_sha256" in " ".join(result.reasons)
 
 

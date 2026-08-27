@@ -15,8 +15,8 @@ class ExperimentContractError(ValueError):
 class ComparabilityStatus(StrEnum):
     COMPARABLE = "comparable"
     INCOMPARABLE = "incomparable"
+    INCOMPLETE = "incomplete"
     INVALID = "invalid"
-    MISSING_COUNTERPART = "missing_counterpart"
 
 
 _REQUIRED_SECTIONS = (
@@ -48,8 +48,16 @@ def _required_keys(value: dict[str, Any], name: str, keys: tuple[str, ...]) -> N
         raise ExperimentContractError(f"{name} missing required fields: {missing}")
 
 
-def _semantic_value(section: dict[str, Any], name: str) -> Any:
-    return section.get(name)
+def _evidence_unavailable(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().casefold() == "unknown"
+    if isinstance(value, dict):
+        return any(_evidence_unavailable(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_evidence_unavailable(item) for item in value)
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,20 +294,38 @@ def compare_experiment_pair(
     records: list[ExperimentRecordV1] | tuple[ExperimentRecordV1, ...],
 ) -> PairComparisonV1:
     rows = tuple(records)
-    if len(rows) != 2:
+    if len(rows) < 2:
         return PairComparisonV1(
-            ComparabilityStatus.MISSING_COUNTERPART,
+            ComparabilityStatus.INCOMPLETE,
             rows,
             ("exactly two arms are required",),
             {},
             None,
         )
+    if len(rows) > 2:
+        return PairComparisonV1(
+            ComparabilityStatus.INVALID,
+            rows,
+            ("exactly two arms are required",),
+            {},
+            None,
+        )
+
     keys = [row.logical_key for row in rows]
-    reasons: list[str] = []
+    invalid_reasons: list[str] = []
+    incomplete_reasons: list[str] = []
+    incomparable_reasons: list[str] = []
     if len(set(keys)) != len(keys):
-        reasons.append(f"duplicate logical key: {keys[0]!r}")
+        invalid_reasons.append(f"duplicate logical key: {keys[0]!r}")
+    if (
+        len({row.experiment["experiment_id"] for row in rows}) > 1
+        or len({row.experiment["pair_id"] for row in rows}) > 1
+        or len({row.experiment["trial_id"] for row in rows}) > 1
+    ):
+        invalid_reasons.append("experiment/pair/trial identity mismatch")
     if any(row.profile_identity["completeness"] != "complete" for row in rows):
-        reasons.append("effective profile is incomplete")
+        incomplete_reasons.append("effective profile is incomplete")
+
     for label, getter in (
         ("experiment definition", lambda row: row.experiment["experiment_definition_sha256"]),
         ("task_contract_sha256", lambda row: row.task["task_contract_sha256"]),
@@ -314,24 +340,26 @@ def compare_experiment_pair(
         ),
         ("budget", lambda row: row.budget["configured_budget"]),
     ):
+        values = tuple(getter(row) for row in rows)
+        if any(_evidence_unavailable(value) for value in values):
+            incomplete_reasons.append(f"{label} evidence unavailable")
+            continue
         mismatch = _same(rows, label, getter)
         if mismatch:
-            reasons.append(mismatch)
-    if (
-        len({row.experiment["experiment_id"] for row in rows}) > 1
-        or len({row.experiment["pair_id"] for row in rows}) > 1
-        or len({row.experiment["trial_id"] for row in rows}) > 1
-    ):
-        reasons.append("experiment/pair/trial identity mismatch")
+            incomparable_reasons.append(mismatch)
+
     status = (
         ComparabilityStatus.INVALID
-        if any("duplicate" in reason for reason in reasons)
+        if invalid_reasons
+        else ComparabilityStatus.INCOMPLETE
+        if incomplete_reasons
         else ComparabilityStatus.INCOMPARABLE
-        if reasons
+        if incomparable_reasons
         else ComparabilityStatus.COMPARABLE
     )
+    reasons = (*invalid_reasons, *incomplete_reasons, *incomparable_reasons)
     verification = {row.experiment["arm_id"]: row.aao_verification for row in rows}
-    return PairComparisonV1(status, rows, tuple(reasons), verification, None)
+    return PairComparisonV1(status, rows, reasons, verification, None)
 
 
 def build_experiment_pair_report(
