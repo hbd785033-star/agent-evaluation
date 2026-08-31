@@ -28,7 +28,7 @@ from evaluators.trajectory import TrajectoryStep, check_trajectory
 
 from .adapters import AgentAdapter
 from .checkers import CheckerProfile, TaskCheckRegistry
-from .models import EvaluatedRun, RunRecord, TaskCase
+from .models import EvaluatedRun, RunRecord, SuccessCriterion, TaskCase
 
 Judge = Callable[[TaskCase, RunRecord, dict[str, Any]], dict[str, Any]]
 TaskCheck = Callable[[TaskCase, RunRecord], list[CheckResult]]
@@ -37,6 +37,11 @@ TaskCheck = Callable[[TaskCase, RunRecord], list[CheckResult]]
 def _criterion_key(value: str) -> str:
     """Normalize cosmetic separators without equating unrelated criteria."""
     return re.sub(r"[^a-z0-9]+", "_", str(value).casefold()).strip("_")
+
+
+def _criterion_id(value: SuccessCriterion | str) -> str:
+    """Return the stable ID while retaining legacy string criteria support."""
+    return value.id if isinstance(value, SuccessCriterion) else value
 
 
 def _allowed_roots(patterns: list[str]) -> list[str]:
@@ -271,6 +276,7 @@ def evaluate_run(
         )
     )
     required_deterministic = task.success_criteria.get("deterministic", [])
+    required_ids = [_criterion_id(criterion) for criterion in required_deterministic]
     criterion_checks: list[CheckResult] = []
     if required_deterministic:
         if task_check is None:
@@ -282,7 +288,7 @@ def evaluate_run(
                         f"{len(required_deterministic)} criteria have no executable checker; "
                         "refusing to infer PASS from free-form text"
                     ),
-                    evidence=list(required_deterministic),
+                    evidence=required_ids,
                 )
             )
         else:
@@ -300,7 +306,7 @@ def evaluate_run(
             deterministic_checks.extend(task_check_results)
             returned_names = [result.check_name for result in task_check_results]
             returned_keys = Counter(_criterion_key(name) for name in returned_names)
-            required_keys = Counter(_criterion_key(name) for name in required_deterministic)
+            required_keys = Counter(_criterion_key(name) for name in required_ids)
             if returned_keys != required_keys:
                 deterministic_checks.append(
                     CheckResult(
@@ -308,9 +314,9 @@ def evaluate_run(
                         "task_specific_criteria_coverage",
                         (
                             f"checker returned criteria {returned_names!r}; expected "
-                            f"{list(required_deterministic)!r}"
+                            f"{required_ids!r}"
                         ),
-                        list(required_deterministic),
+                        required_ids,
                     )
                 )
     deterministic = run_checks(deterministic_checks)

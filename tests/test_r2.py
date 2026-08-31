@@ -579,6 +579,76 @@ def test_evaluate_cli_does_not_trust_execution_record_authority_claims(tmp_path)
     assert trusted_exit == 0
 
 
+def test_evaluate_cli_writes_structured_checker_report_without_profile(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "result.txt").write_text("PASS\n", encoding="utf-8")
+    dataset = tmp_path / "dataset.yaml"
+    dataset.write_text(
+        """version: r2-e2e
+tasks:
+  - id: imported-task
+    prompt: Verify result
+    success_criteria:
+      deterministic:
+        - id: result_exists
+          checker: file_exists
+          path: result.txt
+        - id: result_contains_pass
+          checker: file_contains
+          path: result.txt
+          contains: PASS
+""",
+        encoding="utf-8",
+    )
+    record = tmp_path / "execution-record.json"
+    record.write_text(
+        json.dumps(_execution_record(task_id="imported-task", workspace_root=str(workspace))),
+        encoding="utf-8",
+    )
+    authority = tmp_path / "authority.json"
+    authority.write_text(
+        json.dumps(
+            {
+                "schema_version": "0.1",
+                "trusted_workspace_root": str(tmp_path),
+                "isolation_level": "workspace",
+                "workspaces": [
+                    {
+                        "task_id": "imported-task",
+                        "trial": 1,
+                        "workspace_root": str(workspace),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "report"
+
+    exit_code = main(
+        [
+            "evaluate",
+            str(record),
+            "--dataset",
+            str(dataset),
+            "--workspace-authority",
+            str(authority),
+            "--output-dir",
+            str(output),
+        ]
+    )
+
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["runs"][0]["passed"] is True
+    criteria = report["runs"][0]["layers"]["deterministic"]["criterion_checks"]
+    assert [item["criterion_id"] for item in criteria] == [
+        "result_exists",
+        "result_contains_pass",
+    ]
+
+
 def test_perfect_agent_cli_exits_zero_and_writes_evidence(tmp_path):
     root = Path(__file__).parents[1]
     output = tmp_path / "report"

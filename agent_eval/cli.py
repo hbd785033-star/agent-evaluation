@@ -84,11 +84,10 @@ def main(argv: list[str] | None = None) -> int:
             load_execution_records(args.execution_record), authority=authority
         )
         checker_profile = None
-        checker_registry = None
+        checker_registry = TaskCheckRegistry()
         if args.checker_profile:
             checker_raw = yaml.safe_load(Path(args.checker_profile).read_text(encoding="utf-8"))
             checker_profile = CheckerProfile.from_mapping(checker_raw)
-            checker_registry = TaskCheckRegistry()
         judge = controlled_profile_judge(args.judge_profile) if args.judge_profile else None
         report = EvalRunner(
             adapter,
@@ -159,11 +158,10 @@ def main(argv: list[str] | None = None) -> int:
             preserve_workspaces=args.preserve_workspaces,
         )
     checker_profile = None
-    checker_registry = None
+    checker_registry = TaskCheckRegistry()
     if args.checker_profile:
         checker_raw = yaml.safe_load(Path(args.checker_profile).read_text(encoding="utf-8"))
         checker_profile = CheckerProfile.from_mapping(checker_raw)
-        checker_registry = TaskCheckRegistry()
     judge = controlled_profile_judge(args.judge_profile) if args.judge_profile else None
     report = EvalRunner(
         adapter,
